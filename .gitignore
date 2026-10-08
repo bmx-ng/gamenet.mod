@@ -12,3 +12,4 @@
 *.app/
 *.exe
 /*.mod/tests/test
+/*.mod/tests/enet

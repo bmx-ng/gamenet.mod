@@ -491,6 +491,15 @@ Struct SPacketReader
 	End Method
 
 	Rem
+	bbdoc: Returns a borrowed view of all unread bytes.
+	End Rem
+	Method RemainingView:SPacketView()
+		Local data:Byte Ptr
+		If _data Then data = _data + _position
+		Return New SPacketView(data, Remaining())
+	End Method
+
+	Rem
 	bbdoc: Returns True after a read exceeds the packet or uses a Null destination.
 	End Rem
 	Method Failed:Int()

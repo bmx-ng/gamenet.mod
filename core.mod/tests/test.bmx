@@ -24,6 +24,8 @@ Local u32:UInt
 Local f32:Float
 
 Check(reader.ReadUInt8(u8) And u8 = $ab, "read uint8")
+Local remaining:SPacketView = reader.RemainingView()
+Check(remaining.Length() = 10 And (UInt(remaining.Data()[0]) & $ff:UInt) = $cd, "remaining packet view")
 Check(reader.ReadUInt16(u16) And u16 = $cdef, "read uint16")
 Check(reader.ReadUInt32(u32) And u32 = $81234567:UInt, "read uint32")
 Check(reader.ReadFloat32(f32) And f32 = 12.5, "read float32")

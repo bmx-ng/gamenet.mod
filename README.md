@@ -10,6 +10,8 @@ Transport-independent building blocks for real-time multiplayer games.
   local multiplayer, and protocol development.
 - `GameNet.ENet` provides UDP networking through ENet for direct and hosted
   connections.
+- `GameNet.Session` adds a versioned handshake and framed application messages
+  above any GameNet transport.
 
 Planned transport modules include `GameNet.GameKit`. Each backend imports
 `GameNet.Core`; the core module does not depend on a native networking library

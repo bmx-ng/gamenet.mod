@@ -61,6 +61,7 @@ Enum ETransportResult:Byte
 	Ok
 	WouldBlock
 	InvalidPeer
+	InvalidChannel
 	PacketTooLarge
 	Closed
 	Failed

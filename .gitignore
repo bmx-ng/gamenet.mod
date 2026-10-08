@@ -1,0 +1,14 @@
+.DS_Store
+.bmx/
+.generics/
+/*.mod/*.debug.*
+/*.mod/*.release.*
+/*.mod/.generics/
+*.bmxbuild
+*.bmxbuild.*
+*.bmxbuild.stamp
+*.i2
+*.module-config
+*.app/
+*.exe
+/*.mod/tests/test

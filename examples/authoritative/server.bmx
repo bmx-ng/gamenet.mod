@@ -10,7 +10,7 @@ Include "protocol.bmx"
 
 Const MAX_PLAYERS:Int = 1
 Const SIMULATION_STEP:Float = 1.0 / 60.0
-Const SNAPSHOT_INTERVAL:Int = 50
+Const SNAPSHOT_INTERVAL:Int = 16
 Const PLAYER_SPEED:Float = 180.0
 
 Local transport:TENetTransport = TENetTransport.Listen(AUTHORITATIVE_PORT, MAX_PLAYERS, 2)

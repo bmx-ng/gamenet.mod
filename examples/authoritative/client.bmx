@@ -23,7 +23,11 @@ If transport.Connect(serverAddress, serverPort, pendingPeer) <> ETransportResult
 Local session:TNetSession = TNetSession.CreateClient(transport, AUTHORITATIVE_APP_ID, AUTHORITATIVE_APP_VERSION, Null, 0, 1, 1200)
 If Not session Then Throw "Could not create the client session"
 
-Graphics 960, 540, 0
+?android Or ios
+Graphics 960, 540, 32, 0, GRAPHICS_FULLSCREEN_DESKTOP
+?Not android And Not ios
+Graphics 960, 540
+?
 SetVirtualResolution(Int(WORLD_WIDTH), Int(WORLD_HEIGHT), VIRTUAL_LETTERBOX)
 SetVirtualBarColor 6, 9, 16
 SetClsColor 12, 18, 30

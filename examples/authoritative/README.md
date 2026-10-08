@@ -37,10 +37,11 @@ host and port on its command line:
 
 For an iOS or Android device, set `serverAddress` near the top of `client.bmx`
 to the host computer's LAN address before building. The host firewall must allow
-incoming UDP traffic on port 46340. The Android SDL template already requests
-network access.
+incoming UDP traffic on port 46340. `client.settings` applies the included
+Android manifest overlay so device builds request network access.
 
-The example intentionally does not perform client prediction or snapshot
-interpolation. The visible latency makes the boundary clear: input is a request,
-and the host's snapshots are authoritative. Those presentation techniques can
-be added without changing the transport or session APIs.
+The example sends snapshots at 60 Hz but intentionally does not perform client
+prediction or snapshot interpolation. Network latency therefore remains
+visible: input is a request, and the host's snapshots are authoritative. Those
+presentation techniques can be added without changing the transport or session
+APIs.

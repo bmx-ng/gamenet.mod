@@ -13,3 +13,10 @@
 *.exe
 /*.mod/tests/test
 /*.mod/tests/enet
+/examples/authoritative/client
+/examples/authoritative/server
+/examples/authoritative/test_protocol
+/examples/authoritative/android-project-client/
+/examples/authoritative/client.apk
+/examples/authoritative/client.module-config
+/examples/authoritative/libclient.so

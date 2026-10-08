@@ -20,3 +20,9 @@
 /examples/authoritative/client.apk
 /examples/authoritative/client.module-config
 /examples/authoritative/libclient.so
+/examples/authoritative/Assets.xcassets/
+/examples/authoritative/DerivedData/
+/examples/authoritative/Info.plist
+/examples/authoritative/LaunchScreen.storyboard
+/examples/authoritative/client.xcodeproj/
+/examples/authoritative/main.m

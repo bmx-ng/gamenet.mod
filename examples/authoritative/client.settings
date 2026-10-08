@@ -5,3 +5,5 @@ app.name=GameNet Authoritative Example
 app.orientation=landscape
 app.fullscreen=true
 android.manifest=android/AndroidManifest.extra.xml
+ios.deployment.target=14.0
+ios.info.plist=ios/Info.extra.plist

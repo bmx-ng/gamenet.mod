@@ -25,3 +25,10 @@ Install the repository as `mod/gamenet.mod` in a BlitzMax NG SDK:
 ```sh
 git clone https://github.com/bmx-ng/gamenet.mod.git mod/gamenet.mod
 ```
+
+## Example
+
+[`examples/authoritative`](examples/authoritative) contains a small headless
+ENet host and Max2D client. It demonstrates a server-owned simulation, versioned
+session join, reliable lifecycle messages, and unreliable-sequenced input and
+snapshots.

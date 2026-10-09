@@ -1,7 +1,8 @@
 # GameNet.RollbackSession
 
-`GameNet.RollbackSession` coordinates the common machinery of a two-player
-deterministic rollback game above `GameNet.Session` and `GameNet.Rollback`.
+`GameNet.RollbackSession` coordinates the common machinery of a two- to
+eight-player deterministic rollback game above `GameNet.Session` and
+`GameNet.Rollback`.
 
 It provides:
 
@@ -36,6 +37,22 @@ input message to `ReceiveInputs`, and each hash message to `ReceiveHash`.
 `TNetSession`; `WriteInputs` and `WriteReadyHash` are also available when the
 application needs to compose or route messages itself.
 
+For sessions with more than two players, identify the source player when
+calling `ReceiveHash(player, packet)`. `WriteInputs` and `WriteReadyHash`
+produce one local packet which may be broadcast to every other player;
+`SendInputs` sends an input packet to one chosen peer. `SendReadyHash` is a
+two-player convenience because a ready hash is consumed once it is written;
+larger sessions should write it once and broadcast the same bytes.
+`HasRemoteFrame(player)` and `RemoteSimulationFrame(player)` expose individual
+progress, while their no-argument forms report whether all remote players have
+reported and return the slowest reported frame.
+
+The supported range is deliberately capped at eight. Memory is allocated only
+for the configured count, but simulation/replay cost grows with player count
+and a full peer mesh also increases message fan-out. Larger games should
+normally use an authoritative server and snapshots rather than one shared
+rollback timeline.
+
 ## Desync recovery
 
 `authorityPlayer` in `SRollbackSessionConfig` selects the peer whose state wins
@@ -48,11 +65,13 @@ an older request cannot replace a newer recovery attempt.
 
 The response contains one confirmed opaque game-state snapshot. The receiver
 validates its hash, restores it, and replays retained inputs to its current
-frame without restarting the match. Request and response messages must use a
-reliable ordered channel. The response occupies `StateSyncPacketCapacity`
-bytes at most (`maxStateSize + 17`), so both the caller's packet buffer and the
-underlying session payload limit must be at least that large. This initial
-facility intentionally does not fragment large states.
+frame without restarting the match. The authority never selects a state newer
+than the confirmed boundary reported by either peer. Request and response
+messages must use a reliable ordered channel. The response occupies
+`StateSyncPacketCapacity` bytes at most (`maxStateSize + 17`), so both the
+caller's packet buffer and the underlying session payload limit must be at
+least that large. This initial facility intentionally does not fragment large
+states.
 
 The authority is a convergence policy, not a cheat-prevention mechanism: if
 its state is wrong, that state still wins. Nor can recovery retract an

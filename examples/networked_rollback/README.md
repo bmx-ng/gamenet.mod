@@ -2,8 +2,9 @@
 
 This example runs the same deterministic two-player simulation on two clients.
 A small ENet relay pairs the clients and forwards inputs, but does not simulate
-or own game state. Each client uses `GameNet.Session` and `GameNet.Rollback`
-directly.
+or own game state. Each client uses `GameNet.RollbackSession` above
+`GameNet.Session`; the example only supplies its deterministic game-state and
+input operations.
 
 Build and start the relay:
 
@@ -38,6 +39,6 @@ Every thirty confirmed frames, clients exchange a hash of deterministic state.
 The HUD reports relay round-trip time, confirmed and peer frames, rollback
 depth, prediction outcomes, rejected inputs, checked hashes, and desyncs.
 
-This is intentionally an example-level coordinator. It will be used to decide
-which timing, input exchange, and diagnostics policies belong in a future
-higher-level rollback-session module.
+The relay treats rollback input and hash payloads as opaque messages. Their
+encoding, redundant delivery, prediction limits, rollback, hash checking, and
+diagnostic counters are owned by `GameNet.RollbackSession`.

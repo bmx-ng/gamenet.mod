@@ -4,7 +4,6 @@ Framework BRL.StandardIO
 Import BRL.System
 Import GameNet.Session
 Import GameNet.ENet
-Import GameNet.Rollback
 
 Include "protocol.bmx"
 
@@ -19,9 +18,6 @@ End Struct
 Global relaySession:TNetSession
 Global relayPlayers:SRelayPlayer[ROLLBACK_PLAYER_COUNT]
 Global relayBuffer:Byte[64]
-Global relayFrames:UInt[ROLLBACK_INPUT_BATCH_MAX]
-Global relayAxisXs:Int[ROLLBACK_INPUT_BATCH_MAX]
-Global relayAxisYs:Int[ROLLBACK_INPUT_BATCH_MAX]
 Global relayMatchId:UInt
 Global relayInputPacketCount:UInt
 Global relayDelayMillis:Int
@@ -145,18 +141,10 @@ While relaySession.IsOpen()
 				If player < 0 Or Not relayPlayers[player].active Then Continue
 				Select event.MessageType()
 					Case ROLLBACK_MSG_INPUT
-						Local simulatedFrame:UInt
-						Local count:Int
-						If event.Channel() = ROLLBACK_GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced Then
-							If DecodeRollbackInputBatch(event.Payload(), simulatedFrame, relayFrames, relayAxisXs, relayAxisYs, count) Then ForwardRelayInput(player, event)
-						End If
+						If event.Channel() = ROLLBACK_GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced And event.Payload().Length() >= 12 Then ForwardRelayInput(player, event)
 
 					Case ROLLBACK_MSG_HASH
-						Local frame:UInt
-						Local hash:UInt
-						If event.Channel() = ROLLBACK_CONTROL_CHANNEL And event.Delivery() = EDeliveryMode.ReliableOrdered Then
-							If DecodeStateHash(event.Payload(), frame, hash) Then ForwardRelayMessage(player, event)
-						End If
+						If event.Channel() = ROLLBACK_CONTROL_CHANNEL And event.Delivery() = EDeliveryMode.ReliableOrdered And event.Payload().Length() = 8 Then ForwardRelayMessage(player, event)
 
 					Case ROLLBACK_MSG_PING
 						Local token:UInt

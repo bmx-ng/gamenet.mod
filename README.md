@@ -20,7 +20,8 @@ Transport-independent building blocks for real-time multiplayer games.
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a
   reusable two-player deterministic timeline with input delay, redundant
-  delivery, re-simulation, confirmed-state hashes, and diagnostics.
+  delivery, re-simulation, confirmed presentation effects, state hashes, and
+  diagnostics.
 
 Planned transport modules include `GameNet.GameKit`. Each backend imports
 `GameNet.Core`; the core module does not depend on a native networking library

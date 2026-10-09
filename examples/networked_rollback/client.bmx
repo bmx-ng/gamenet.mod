@@ -23,6 +23,7 @@ Const ROLLBACK_HISTORY:Int = 240
 Const GAME_STATE_SIZE:Size_T = 16
 Const HASH_INTERVAL:UInt = 30
 Const HASH_QUEUE_SIZE:Int = 32
+Const EFFECT_GRID_CROSSING:UInt = 1
 
 Struct SGameState
 	Field player0X:Int
@@ -54,9 +55,10 @@ Function DecodeMovementInput:Int(packet:SPacketView, axisX:Int Var, axisY:Int Va
 	Return True
 End Function
 
-Type TGameSimulation Implements IRollbackSimulation
+Type TGameSimulation Implements IRollbackSimulation, IRollbackEffectSimulation
 	Private
 	Field _state:SGameState
+	Field _effectPayload:Byte[1]
 
 	Public
 	Method Reset()
@@ -97,15 +99,25 @@ Type TGameSimulation Implements IRollbackSimulation
 	End Method
 
 	Method SimulateFrame:Int(frame:UInt, inputs:SRollbackInput[])
+		Return SimulateFrame(frame, inputs, Null)
+	End Method
+
+	Method SimulateFrame:Int(frame:UInt, inputs:SRollbackInput[], effects:IRollbackEffectWriter)
 		For Local player:Int = 0 Until ROLLBACK_PLAYER_COUNT
 			Local x:Int, y:Int
 			If Not DecodeMovementInput(inputs[player].Payload(), x, y) Then Return False
+			Local oldX:Int = PlayerX(player)
+			Local oldY:Int = PlayerY(player)
 			If player = 0 Then
 				_state.player0X = Max(PLAYER_RADIUS, Min(WORLD_WIDTH - PLAYER_RADIUS, _state.player0X + x * PLAYER_SPEED))
 				_state.player0Y = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, _state.player0Y + y * PLAYER_SPEED))
 			Else
 				_state.player1X = Max(PLAYER_RADIUS, Min(WORLD_WIDTH - PLAYER_RADIUS, _state.player1X + x * PLAYER_SPEED))
 				_state.player1Y = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, _state.player1Y + y * PLAYER_SPEED))
+			End If
+			If oldX / 40 <> PlayerX(player) / 40 Or oldY / 40 <> PlayerY(player) / 40 Then
+				_effectPayload[0] = Byte(player)
+				If effects And Not effects.Emit(EFFECT_GRID_CROSSING, Byte Ptr(_effectPayload), 1) Then Return False
 			End If
 		Next
 		Return True
@@ -176,6 +188,9 @@ Local accumulator:Double
 Local previousTime:Int = MilliSecs()
 Local lastInputSend:Int, lastPingSend:Int, roundTripMillis:Int
 Local lastDiagnosticFrame:UInt
+Local confirmedEffects:Int
+Local lastConfirmedEffectFrame:UInt
+Local reportedSimulationFailure:Int
 
 While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 	Local now:Int = MilliSecs()
@@ -208,6 +223,9 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 							simulation.Reset()
 							Local n:Size_T = EncodeMovementInput(Byte Ptr(inputBuffer), Size_T(inputBuffer.Length), 0, 0)
 							game.Start(Byte Ptr(inputBuffer), n)
+							confirmedEffects = 0
+							lastConfirmedEffectFrame = 0
+							reportedSimulationFailure = False
 							game.SendInputs(session, hostPeer, ROLLBACK_MSG_INPUT, ROLLBACK_GAMEPLAY_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 							lastInputSend = now
 							accumulator = 0.0
@@ -271,9 +289,23 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 			game.SendInputs(session, hostPeer, ROLLBACK_MSG_INPUT, ROLLBACK_GAMEPLAY_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 			lastInputSend = now
 		End If
-		If game.Failed() Then status = "Rollback simulation failed"
+		If game.Failed() Then
+			status = "Rollback simulation failed"
+			If Not reportedSimulationFailure Then
+				Print status + " at frame " + game.CurrentFrame()
+				reportedSimulationFailure = True
+			End If
+		End If
 	Else
 		accumulator = 0.0
+	End If
+
+	If game Then
+		Local effect:SRollbackEffect
+		While game.PollConfirmedEffect(effect)
+			confirmedEffects :+ 1
+			lastConfirmedEffectFrame = effect.Frame()
+		Wend
 	End If
 
 	Cls
@@ -301,10 +333,11 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		DrawText "Rollbacks " + game.RollbackCount() + "    last " + game.LastRollbackDepth() + "    largest " + game.LargestRollbackDepth(), 12, 92
 		DrawText "Predicted " + game.PredictedFrames() + "    matched " + game.PredictionMatches() + "    mismatched " + game.PredictionMismatches(), 12, 112
 		DrawText "Hashes " + game.HashesChecked() + "    desyncs " + game.HashMismatches() + "    rejected inputs " + game.RejectedInputs(), 12, 132
+		DrawText "Confirmed effects " + confirmedEffects + "    latest frame " + lastConfirmedEffectFrame + "    dropped " + game.DroppedConfirmedEffects(), 12, 152
 	Else
 		DrawText "Waiting for a two-player match", 12, 72
 	End If
-	DrawText "WASD / arrows / on-screen stick", 12, 152
+	DrawText "WASD / arrows / on-screen stick", 12, 172
 	controls.Render()
 	Flip 1
 Wend

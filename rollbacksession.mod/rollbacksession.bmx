@@ -37,10 +37,54 @@ Import GameNet.Rollback
 Import BRL.Blitz
 
 Rem
+bbdoc: Receives presentation effects produced while simulating one frame.
+about: Effects are retained by the rollback session and become visible to the
+application only after their frame is confirmed. Payload bytes are copied.
+End Rem
+Interface IRollbackEffectWriter
+	Method Emit:Int(kind:UInt, payload:Byte Ptr = Null, length:Size_T = 0)
+End Interface
+
+Rem
+bbdoc: One confirmed presentation effect from a deterministic frame.
+about: The payload is borrowed and remains valid until the next rollback
+session operation.
+End Rem
+Struct SRollbackEffect
+	Private
+	Field _frame:UInt
+	Field _kind:UInt
+	Field _payload:SPacketView
+
+	Method New(frame:UInt, kind:UInt, payload:SPacketView)
+		_frame = frame
+		_kind = kind
+		_payload = payload
+	End Method
+
+	Public
+	Method New()
+	End Method
+
+	Method Frame:UInt()
+		Return _frame
+	End Method
+
+	Method Kind:UInt()
+		Return _kind
+	End Method
+
+	Method Payload:SPacketView()
+		Return _payload
+	End Method
+End Struct
+
+Rem
 bbdoc: Deterministic game operations used by #TRollbackSession.
 about: Implementations should not perform presentation or irreversible effects
-inside #SimulateFrame because a frame may be simulated more than once. The
-input array and all packet views are borrowed and must not be retained.
+directly inside #SimulateFrame because a frame may be simulated more than once.
+They may additionally implement #IRollbackEffectSimulation to record such effects
+safely. The input array and all packet views are borrowed.
 End Rem
 Interface IRollbackSimulation
 	Rem
@@ -66,6 +110,15 @@ Interface IRollbackSimulation
 End Interface
 
 Rem
+bbdoc: Optional extended simulation contract for rollback-safe effects.
+about: Implement both #SimulateFrame overloads. The rollback session uses the
+three-argument overload and retains emitted effects until confirmation.
+End Rem
+Interface IRollbackEffectSimulation
+	Method SimulateFrame:Int(frame:UInt, inputs:SRollbackInput[], effects:IRollbackEffectWriter)
+End Interface
+
+Rem
 bbdoc: Configuration for a #TRollbackSession.
 End Rem
 Struct SRollbackSessionConfig
@@ -79,8 +132,11 @@ Struct SRollbackSessionConfig
 	Field redundantInputFrames:Int
 	Field hashInterval:UInt
 	Field hashQueueSize:Int
+	Field maxEffectsPerFrame:Int
+	Field maxEffectSize:Size_T
+	Field confirmedEffectCapacity:Int
 
-	Method New(playerCount:Int, localPlayer:Int, historyFrames:Int, maxStateSize:Size_T, maxInputSize:Size_T, inputDelayFrames:Int = 3, maxPredictionFrames:Int = 8, redundantInputFrames:Int = 12, hashInterval:UInt = 30, hashQueueSize:Int = 32)
+	Method New(playerCount:Int, localPlayer:Int, historyFrames:Int, maxStateSize:Size_T, maxInputSize:Size_T, inputDelayFrames:Int = 3, maxPredictionFrames:Int = 8, redundantInputFrames:Int = 12, hashInterval:UInt = 30, hashQueueSize:Int = 32, maxEffectsPerFrame:Int = 8, maxEffectSize:Size_T = 64, confirmedEffectCapacity:Int = 64)
 		Self.playerCount = playerCount
 		Self.localPlayer = localPlayer
 		Self.historyFrames = historyFrames
@@ -91,6 +147,9 @@ Struct SRollbackSessionConfig
 		Self.redundantInputFrames = redundantInputFrames
 		Self.hashInterval = hashInterval
 		Self.hashQueueSize = hashQueueSize
+		Self.maxEffectsPerFrame = maxEffectsPerFrame
+		Self.maxEffectSize = maxEffectSize
+		Self.confirmedEffectCapacity = confirmedEffectCapacity
 	End Method
 End Struct
 
@@ -101,9 +160,10 @@ frame operations reuse that storage. It does not own or poll the network
 session; applications route input and hash messages to #ReceiveInputs and
 #ReceiveHash and may use the provided send helpers.
 End Rem
-Type TRollbackSession
+Type TRollbackSession Implements IRollbackEffectWriter
 	Private
 	Field _simulation:IRollbackSimulation
+	Field _effectSimulation:IRollbackEffectSimulation
 	Field _config:SRollbackSessionConfig
 	Field _rollback:TRollbackBuffer
 	Field _stateBuffer:Byte Ptr
@@ -130,9 +190,27 @@ Type TRollbackSession
 	Field _remoteHashValid:Byte[]
 	Field _remoteHashFrames:UInt[]
 	Field _remoteHashes:UInt[]
+	Field _effectFrameTags:UInt[]
+	Field _effectFrameValid:Byte[]
+	Field _effectFrameCounts:Int[]
+	Field _effectKinds:UInt[]
+	Field _effectLengths:Size_T[]
+	Field _effectStorage:Byte Ptr
+	Field _recordingEffects:Int
+	Field _recordingEffectSlot:Int
+	Field _confirmedEffectFrames:UInt[]
+	Field _confirmedEffectKinds:UInt[]
+	Field _confirmedEffectLengths:Size_T[]
+	Field _confirmedEffectStorage:Byte Ptr
+	Field _confirmedEffectRead:Int
+	Field _confirmedEffectWrite:Int
+	Field _confirmedEffectCount:Int
+	Field _droppedConfirmedEffects:Int
+	Field _nextEffectFrame:UInt
 
 	Method New(simulation:IRollbackSimulation, config:SRollbackSessionConfig)
 		_simulation = simulation
+		_effectSimulation = IRollbackEffectSimulation(simulation)
 		_config = config
 		_rollback = TRollbackBuffer.Create(config.playerCount, config.historyFrames, config.maxStateSize, config.maxInputSize)
 		_stateBuffer = MemAlloc(config.maxStateSize)
@@ -142,6 +220,18 @@ Type TRollbackSession
 		_remoteHashValid = New Byte[config.hashQueueSize]
 		_remoteHashFrames = New UInt[config.hashQueueSize]
 		_remoteHashes = New UInt[config.hashQueueSize]
+		If _effectSimulation Then
+			_effectFrameTags = New UInt[config.historyFrames]
+			_effectFrameValid = New Byte[config.historyFrames]
+			_effectFrameCounts = New Int[config.historyFrames]
+			_effectKinds = New UInt[config.historyFrames * config.maxEffectsPerFrame]
+			_effectLengths = New Size_T[config.historyFrames * config.maxEffectsPerFrame]
+			_effectStorage = MemAlloc(Size_T(config.historyFrames * config.maxEffectsPerFrame) * config.maxEffectSize)
+			_confirmedEffectFrames = New UInt[config.confirmedEffectCapacity]
+			_confirmedEffectKinds = New UInt[config.confirmedEffectCapacity]
+			_confirmedEffectLengths = New Size_T[config.confirmedEffectCapacity]
+			_confirmedEffectStorage = MemAlloc(Size_T(config.confirmedEffectCapacity) * config.maxEffectSize)
+		End If
 	End Method
 
 	Method SaveCurrentState:Int(frame:UInt)
@@ -156,6 +246,63 @@ Type TRollbackSession
 			If _rollback.GetInput(player, frame - UInt(age), input) Then Return input.Payload()
 		Next
 		Return New SPacketView
+	End Method
+
+	Method EffectEntry:Int(frameSlot:Int, effectIndex:Int)
+		Return frameSlot * _config.maxEffectsPerFrame + effectIndex
+	End Method
+
+	Method EffectAddress:Byte Ptr(entry:Int)
+		Return _effectStorage + Size_T(entry) * _config.maxEffectSize
+	End Method
+
+	Method ConfirmedEffectAddress:Byte Ptr(slot:Int)
+		Return _confirmedEffectStorage + Size_T(slot) * _config.maxEffectSize
+	End Method
+
+	Method BeginEffectFrame(frame:UInt)
+		If Not _effectSimulation Then Return
+		Local slot:Int = Int(frame Mod UInt(_config.historyFrames))
+		_effectFrameTags[slot] = frame
+		_effectFrameValid[slot] = True
+		_effectFrameCounts[slot] = 0
+		_recordingEffectSlot = slot
+		_recordingEffects = True
+	End Method
+
+	Method EndEffectFrame()
+		_recordingEffects = False
+	End Method
+
+	Method QueueConfirmedEffect(frame:UInt, kind:UInt, payload:Byte Ptr, length:Size_T)
+		If _confirmedEffectCount = _confirmedEffectFrames.Length Then
+			_droppedConfirmedEffects :+ 1
+			Return
+		End If
+		Local slot:Int = _confirmedEffectWrite
+		_confirmedEffectFrames[slot] = frame
+		_confirmedEffectKinds[slot] = kind
+		_confirmedEffectLengths[slot] = length
+		If length > 0 Then MemCopy(ConfirmedEffectAddress(slot), payload, length)
+		_confirmedEffectWrite = (_confirmedEffectWrite + 1) Mod _confirmedEffectFrames.Length
+		_confirmedEffectCount :+ 1
+	End Method
+
+	Method CommitConfirmedEffects()
+		If Not _effectSimulation Or _rollback.NeedsRollback() Or Not _rollback.HasConfirmedFrame() Or _totalFrames = 0 Then Return
+		Local confirmed:UInt = _rollback.ConfirmedFrame()
+		Local lastSimulated:UInt = _currentFrame - 1
+		If RollbackFrameAfter(confirmed, lastSimulated) Then confirmed = lastSimulated
+		While Not RollbackFrameAfter(_nextEffectFrame, confirmed)
+			Local frameSlot:Int = Int(_nextEffectFrame Mod UInt(_config.historyFrames))
+			If _effectFrameValid[frameSlot] And _effectFrameTags[frameSlot] = _nextEffectFrame Then
+				For Local effectIndex:Int = 0 Until _effectFrameCounts[frameSlot]
+					Local entry:Int = EffectEntry(frameSlot, effectIndex)
+					QueueConfirmedEffect(_nextEffectFrame, _effectKinds[entry], EffectAddress(entry), _effectLengths[entry])
+				Next
+			End If
+			_nextEffectFrame :+ 1
+		Wend
 	End Method
 
 	Method PrepareInputs:Int(frame:UInt, replacePredictions:Int)
@@ -191,7 +338,15 @@ Type TRollbackSession
 		For Local offset:Int = 0 Until depth
 			Local frame:UInt = startFrame + UInt(offset)
 			If Not SaveCurrentState(frame) Or Not PrepareInputs(frame, True) Then Return False
-			If Not _simulation.SimulateFrame(frame, _frameInputs) Then Return False
+			BeginEffectFrame(frame)
+			Local simulated:Int
+			If _effectSimulation Then
+				simulated = _effectSimulation.SimulateFrame(frame, _frameInputs, Self)
+			Else
+				simulated = _simulation.SimulateFrame(frame, _frameInputs)
+			End If
+			EndEffectFrame()
+			If Not simulated Then Return False
 		Next
 		If Not SaveCurrentState(_currentFrame) Then Return False
 		_rollback.ClearRollback()
@@ -202,7 +357,7 @@ Type TRollbackSession
 	End Method
 
 	Method CheckRemoteHashes()
-		If Not _rollback.HasConfirmedFrame() Then Return
+		If _rollback.NeedsRollback() Or Not _rollback.HasConfirmedFrame() Then Return
 		Local confirmedStateFrame:UInt = _rollback.ConfirmedFrame() + 1
 		For Local slot:Int = 0 Until _remoteHashValid.Length
 			If Not _remoteHashValid[slot] Then Continue
@@ -222,7 +377,8 @@ Type TRollbackSession
 			And config.inputDelayFrames >= 0 And config.inputDelayFrames < config.historyFrames ..
 			And config.maxPredictionFrames >= 0 And config.maxPredictionFrames < config.historyFrames ..
 			And config.redundantInputFrames >= 1 And config.redundantInputFrames <= 255 ..
-			And config.hashQueueSize >= 1
+			And config.hashQueueSize >= 1 And config.maxEffectsPerFrame >= 1 ..
+			And config.maxEffectSize >= 1 And config.confirmedEffectCapacity >= 1
 	End Function
 
 	Public
@@ -237,8 +393,45 @@ Type TRollbackSession
 	Method Delete()
 		If _stateBuffer Then MemFree(_stateBuffer)
 		If _inputBuffer Then MemFree(_inputBuffer)
+		If _effectStorage Then MemFree(_effectStorage)
+		If _confirmedEffectStorage Then MemFree(_confirmedEffectStorage)
 		_stateBuffer = Null
 		_inputBuffer = Null
+		_effectStorage = Null
+		_confirmedEffectStorage = Null
+	End Method
+
+	Rem
+	bbdoc: Records one effect for the frame currently being simulated.
+	returns: False outside simulation or when the per-frame bounds are exceeded.
+	End Rem
+	Method Emit:Int(kind:UInt, payload:Byte Ptr = Null, length:Size_T = 0) Override
+		If Not _recordingEffects Or length > _config.maxEffectSize Or (length > 0 And Not payload) Then Return False
+		Local effectIndex:Int = _effectFrameCounts[_recordingEffectSlot]
+		If effectIndex >= _config.maxEffectsPerFrame Then Return False
+		Local entry:Int = EffectEntry(_recordingEffectSlot, effectIndex)
+		_effectKinds[entry] = kind
+		_effectLengths[entry] = length
+		If length > 0 Then MemCopy(EffectAddress(entry), payload, length)
+		_effectFrameCounts[_recordingEffectSlot] = effectIndex + 1
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns the next effect whose frame is fully confirmed.
+	about: Consume effects regularly. If the bounded delivery queue fills, new
+	effects are dropped and counted by #DroppedConfirmedEffects.
+	End Rem
+	Method PollConfirmedEffect:Int(effect:SRollbackEffect Var)
+		If _confirmedEffectCount = 0 Then
+			effect = New SRollbackEffect
+			Return False
+		End If
+		Local slot:Int = _confirmedEffectRead
+		effect = New SRollbackEffect(_confirmedEffectFrames[slot], _confirmedEffectKinds[slot], New SPacketView(ConfirmedEffectAddress(slot), _confirmedEffectLengths[slot]))
+		_confirmedEffectRead = (_confirmedEffectRead + 1) Mod _confirmedEffectFrames.Length
+		_confirmedEffectCount :- 1
+		Return True
 	End Method
 
 	Rem
@@ -264,8 +457,17 @@ Type TRollbackSession
 		_hashesChecked = 0
 		_hashMismatches = 0
 		_hasLastHashSent = False
+		_recordingEffects = False
+		_confirmedEffectRead = 0
+		_confirmedEffectWrite = 0
+		_confirmedEffectCount = 0
+		_droppedConfirmedEffects = 0
+		_nextEffectFrame = 0
 		For Local slot:Int = 0 Until _remoteHashValid.Length
 			_remoteHashValid[slot] = False
+		Next
+		For Local slot:Int = 0 Until _effectFrameValid.Length
+			_effectFrameValid[slot] = False
 		Next
 		For Local frame:UInt = 0 Until UInt(_config.inputDelayFrames)
 			If _rollback.ConfirmInput(_config.localPlayer, frame, initialInput, inputLength) = ERollbackConfirmResult.Rejected Then Return False
@@ -279,6 +481,7 @@ Type TRollbackSession
 
 	Method Stop()
 		_running = False
+		_recordingEffects = False
 	End Method
 
 	Rem
@@ -308,7 +511,19 @@ Type TRollbackSession
 		For Local player:Int = 0 Until _config.playerCount
 			_priorInputs[player] = New SPacketView
 		Next
-		If Not PrepareInputs(_currentFrame, False) Or Not _simulation.SimulateFrame(_currentFrame, _frameInputs) Then
+		If Not PrepareInputs(_currentFrame, False) Then
+			_failed = True
+			Return False
+		End If
+		BeginEffectFrame(_currentFrame)
+		Local simulated:Int
+		If _effectSimulation Then
+			simulated = _effectSimulation.SimulateFrame(_currentFrame, _frameInputs, Self)
+		Else
+			simulated = _simulation.SimulateFrame(_currentFrame, _frameInputs)
+		End If
+		EndEffectFrame()
+		If Not simulated Then
 			_failed = True
 			Return False
 		End If
@@ -319,6 +534,7 @@ Type TRollbackSession
 			Return False
 		End If
 		CheckRemoteHashes()
+		CommitConfirmedEffects()
 		Return True
 	End Method
 
@@ -393,6 +609,7 @@ Type TRollbackSession
 		Next
 		If Not _hasRemoteFrame Or RollbackFrameAfter(simulatedFrame, _remoteSimulationFrame) Then _remoteSimulationFrame = simulatedFrame
 		_hasRemoteFrame = True
+		CommitConfirmedEffects()
 		Return True
 	End Method
 
@@ -520,6 +737,14 @@ Type TRollbackSession
 
 	Method HashMismatches:Int()
 		Return _hashMismatches
+	End Method
+
+	Method PendingConfirmedEffects:Int()
+		Return _confirmedEffectCount
+	End Method
+
+	Method DroppedConfirmedEffects:Int()
+		Return _droppedConfirmedEffects
 	End Method
 End Type
 

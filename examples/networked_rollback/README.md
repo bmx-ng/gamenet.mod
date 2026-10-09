@@ -42,3 +42,7 @@ depth, prediction outcomes, rejected inputs, checked hashes, and desyncs.
 The relay treats rollback input and hash payloads as opaque messages. Their
 encoding, redundant delivery, prediction limits, rollback, hash checking, and
 diagnostic counters are owned by `GameNet.RollbackSession`.
+
+Crossing a background grid line emits a deterministic presentation effect.
+The HUD counts these only after their frames are confirmed, demonstrating that
+an effect is not duplicated when its frame is rolled back and re-simulated.

@@ -341,10 +341,18 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		DrawText "Predicted " + game.PredictedFrames() + "    matched " + game.PredictionMatches() + "    mismatched " + game.PredictionMismatches(), 12, 112
 		DrawText "Hashes " + game.HashesChecked() + "    desyncs " + game.HashMismatches() + "    state syncs " + game.StateSyncCount(), 12, 132
 		DrawText "Confirmed effects " + confirmedEffects + "    latest frame " + lastConfirmedEffectFrame + "    dropped " + game.DroppedConfirmedEffects(), 12, 152
+		Local stepInfo:SRollbackStepInfo = game.StepInfo()
+		If stepInfo.Status() = ERollbackStepStatus.WaitingForInputs Then
+			DrawText "Waiting at input frame " + stepInfo.InputFrame() + "    player mask " + stepInfo.UnconfirmedPlayersMask() + "    lead " + stepInfo.PredictionLead(), 12, 172
+		Else If stepInfo.NeedsStateSync() Then
+			DrawText "Recovering state mismatch at frame " + stepInfo.StateSyncMismatchFrame(), 12, 172
+		Else
+			DrawText "Simulation ready    prediction lead " + stepInfo.PredictionLead(), 12, 172
+		End If
 	Else
 		DrawText "Waiting for a two-player match", 12, 72
 	End If
-	DrawText "WASD / arrows / on-screen stick", 12, 172
+	DrawText "WASD / arrows / on-screen stick", 12, 192
 	controls.Render()
 	Flip 1
 Wend

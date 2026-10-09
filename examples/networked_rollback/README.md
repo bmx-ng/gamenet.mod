@@ -37,7 +37,8 @@ frame.
 
 Every thirty confirmed frames, clients exchange a hash of deterministic state.
 The HUD reports relay round-trip time, confirmed and peer frames, rollback
-depth, prediction outcomes, checked hashes, desyncs, and completed state syncs.
+depth, prediction outcomes, checked hashes, desyncs, completed state syncs,
+prediction lead, and the players blocking progress if prediction is exhausted.
 If the hashes disagree, player one requests a confirmed snapshot from player
 zero and replays its retained inputs from that state. The match continues
 without reconnecting or restarting.

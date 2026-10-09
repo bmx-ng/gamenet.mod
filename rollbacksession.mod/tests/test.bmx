@@ -7,6 +7,17 @@ Function Check(condition:Int, message:String)
 	If Not condition Then Throw message
 End Function
 
+Function WriteSingleInputBatch:Size_T(buffer:Byte Ptr, capacity:Size_T, simulatedFrame:UInt, inputFrame:UInt, value:Byte)
+	Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
+	writer.WriteUInt32(simulatedFrame)
+	writer.WriteUInt8(1)
+	writer.WriteUInt32(inputFrame)
+	writer.WriteUInt16(1)
+	writer.WriteUInt8(UInt(value) & $ff:UInt)
+	If writer.Failed() Then Return 0
+	Return writer.Position()
+End Function
+
 Type TTestSimulation Implements IRollbackSimulation, IRollbackEffectSimulation
 	Field position0:Int
 	Field position1:Int
@@ -138,6 +149,31 @@ Check(plainSession.FailureReason() = ERollbackSessionFailure.None, "healthy sess
 Local invalidStartSession:TRollbackSession = TRollbackSession.Create(New TPlainSimulation, plainConfig)
 Check(Not invalidStartSession.Start(Null, 0), "reject invalid initial input")
 Check(invalidStartSession.Failed() And invalidStartSession.FailureReason() = ERollbackSessionFailure.InvalidStartInput, "report invalid start failure")
+Check(invalidStartSession.StepStatus() = ERollbackStepStatus.Failed, "failed step status")
+
+Local stalledSimulation:TPlainSimulation = New TPlainSimulation
+Local stalledConfig:SRollbackSessionConfig = New SRollbackSessionConfig(3, 0, 32, 4, 1, 1, 2, 4, 0, 4)
+Local stalledSession:TRollbackSession = TRollbackSession.Create(stalledSimulation, stalledConfig)
+Check(stalledSession.Start(Byte Ptr(plainNeutral), 1), "start stall diagnostic session")
+For Local frame:Int = 0 Until 3
+	Check(stalledSession.StepStatus() = ERollbackStepStatus.Ready, "prediction budget initially ready")
+	Check(stalledSession.Step(Byte Ptr(plainNeutral), 1), "consume prediction budget")
+Next
+Local stalledInfo:SRollbackStepInfo = stalledSession.StepInfo()
+Check(stalledInfo.Status() = ERollbackStepStatus.WaitingForInputs And stalledInfo.CurrentFrame() = 3, "report input stall")
+Check(stalledInfo.InputFrame() = 0 And stalledInfo.PredictionLead() = 3, "report stalled prediction frontier")
+Check(stalledInfo.UnconfirmedPlayersMask() = 6 And stalledInfo.UnconfirmedPlayerCount() = 2, "report all blocking players")
+Check(stalledInfo.IsPlayerUnconfirmed(1) And stalledInfo.IsPlayerUnconfirmed(2) And Not stalledInfo.IsPlayerUnconfirmed(0), "query blocking player")
+Local stalledPacket:Byte[32]
+Local stalledLength:Size_T = WriteSingleInputBatch(Byte Ptr(stalledPacket), Size_T(stalledPacket.Length), 3, 0, 0)
+Check(stalledSession.ReceiveInputs(1, New SPacketView(Byte Ptr(stalledPacket), stalledLength)), "receive first blocking input")
+stalledInfo = stalledSession.StepInfo()
+Check(stalledInfo.Status() = ERollbackStepStatus.WaitingForInputs And stalledInfo.UnconfirmedPlayersMask() = 4, "identify remaining blocking player")
+Check(stalledSession.ReceiveInputs(2, New SPacketView(Byte Ptr(stalledPacket), stalledLength)), "receive final blocking input")
+stalledInfo = stalledSession.StepInfo()
+Check(stalledInfo.Status() = ERollbackStepStatus.Ready And stalledInfo.InputFrame() = 1 And stalledInfo.PredictionLead() = 2, "input confirmation releases stall")
+stalledSession.Stop()
+Check(stalledSession.StepStatus() = ERollbackStepStatus.Stopped, "stopped step status")
 
 Local simulation0:TTestSimulation = New TTestSimulation
 Local simulation1:TTestSimulation = New TTestSimulation
@@ -182,6 +218,7 @@ For Local frame:Int = 0 Until 150
 
 	If session1.NeedsStateSync() Then
 		observedStateSync = True
+		Check(session1.StepInfo().NeedsStateSync() And session1.StepInfo().StateSyncMismatchFrame() = session1.StateSyncMismatchFrame(), "step info reports state recovery")
 		Local requestLength:Size_T = session1.WriteStateSyncRequest(Byte Ptr(packet1), Size_T(packet1.Length))
 		Check(requestLength > 0, "write state-sync request")
 		Local responseLength:Size_T = session0.WriteStateSyncResponse(New SPacketView(Byte Ptr(packet1), requestLength), Byte Ptr(packet0), Size_T(packet0.Length))

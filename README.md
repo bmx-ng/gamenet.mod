@@ -43,3 +43,8 @@ snapshots.
 simulation with deliberately delayed remote input. It demonstrates input
 prediction, mismatch detection, state restoration, and bounded re-simulation
 without requiring a network connection.
+
+[`examples/networked_rollback`](examples/networked_rollback) connects two
+deterministic Max2D clients through a non-authoritative ENet relay. It adds
+frame-numbered redundant input, bounded prediction lead, rollback over a real
+session, confirmed-state hashes, and repeatable delay and packet-loss testing.

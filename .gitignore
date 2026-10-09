@@ -40,3 +40,16 @@
 /examples/rollback/LaunchScreen.storyboard
 /examples/rollback/client.xcodeproj/
 /examples/rollback/main.m
+/examples/networked_rollback/client
+/examples/networked_rollback/server
+/examples/networked_rollback/test_protocol
+/examples/networked_rollback/android-project-client/
+/examples/networked_rollback/client.apk
+/examples/networked_rollback/client.module-config
+/examples/networked_rollback/libclient.so
+/examples/networked_rollback/Assets.xcassets/
+/examples/networked_rollback/DerivedData/
+/examples/networked_rollback/Info.plist
+/examples/networked_rollback/LaunchScreen.storyboard
+/examples/networked_rollback/client.xcodeproj/
+/examples/networked_rollback/main.m

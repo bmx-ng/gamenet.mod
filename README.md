@@ -16,6 +16,8 @@ Transport-independent building blocks for real-time multiplayer games.
   estimation, and adaptive jitter delay for real-time presentation.
 - `GameNet.Prediction` optionally retains sequenced input for authoritative
   acknowledgement, replay, and loss recovery.
+- `GameNet.Rollback` optionally stores deterministic frame state and predicted
+  input, reporting the earliest frame which requires re-simulation.
 
 Planned transport modules include `GameNet.GameKit`. Each backend imports
 `GameNet.Core`; the core module does not depend on a native networking library
@@ -36,3 +38,8 @@ git clone https://github.com/bmx-ng/gamenet.mod.git mod/gamenet.mod
 ENet host and Max2D client. It demonstrates a server-owned simulation, versioned
 session join, reliable lifecycle messages, and unreliable-sequenced input and
 snapshots.
+
+[`examples/rollback`](examples/rollback) contains a deterministic local Max2D
+simulation with deliberately delayed remote input. It demonstrates input
+prediction, mismatch detection, state restoration, and bounded re-simulation
+without requiring a network connection.

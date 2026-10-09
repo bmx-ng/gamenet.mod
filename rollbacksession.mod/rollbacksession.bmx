@@ -141,6 +141,105 @@ Enum ERollbackSessionFailure:Int
 End Enum
 
 Rem
+bbdoc: Describes whether #TRollbackSession.Step can advance immediately.
+End Rem
+Enum ERollbackStepStatus:Byte
+	Ready
+	Stopped
+	WaitingForInputs
+	Failed
+End Enum
+
+Rem
+bbdoc: An allocation-free snapshot of rollback simulation progress.
+about: The unconfirmed-player mask uses bit @player for each configured player.
+The input frame is the earliest frame which is not yet fully confirmed.
+End Rem
+Struct SRollbackStepInfo
+	Private
+	Field _status:ERollbackStepStatus
+	Field _currentFrame:UInt
+	Field _hasConfirmedFrame:Int
+	Field _confirmedFrame:UInt
+	Field _predictionLead:Int
+	Field _inputFrame:UInt
+	Field _unconfirmedPlayers:UInt
+	Field _needsStateSync:Int
+	Field _stateSyncMismatchFrame:UInt
+
+	Method New(status:ERollbackStepStatus, currentFrame:UInt, hasConfirmedFrame:Int, confirmedFrame:UInt, predictionLead:Int, inputFrame:UInt, unconfirmedPlayers:UInt, needsStateSync:Int, stateSyncMismatchFrame:UInt)
+		_status = status
+		_currentFrame = currentFrame
+		_hasConfirmedFrame = hasConfirmedFrame
+		_confirmedFrame = confirmedFrame
+		_predictionLead = predictionLead
+		_inputFrame = inputFrame
+		_unconfirmedPlayers = unconfirmedPlayers
+		_needsStateSync = needsStateSync
+		_stateSyncMismatchFrame = stateSyncMismatchFrame
+	End Method
+
+	Public
+	Method New()
+	End Method
+
+	Method Status:ERollbackStepStatus()
+		Return _status
+	End Method
+
+	Method CurrentFrame:UInt()
+		Return _currentFrame
+	End Method
+
+	Method HasConfirmedFrame:Int()
+		Return _hasConfirmedFrame
+	End Method
+
+	Method ConfirmedFrame:UInt()
+		Return _confirmedFrame
+	End Method
+
+	Method PredictionLead:Int()
+		Return _predictionLead
+	End Method
+
+	Method InputFrame:UInt()
+		Return _inputFrame
+	End Method
+
+	Method UnconfirmedPlayersMask:UInt()
+		Return _unconfirmedPlayers
+	End Method
+
+	Method IsPlayerUnconfirmed:Int(player:Int)
+		If player < 0 Or player >= ROLLBACK_SESSION_MAX_PLAYERS Then Return False
+		Return (_unconfirmedPlayers & (1:UInt Shl player)) <> 0
+	End Method
+
+	Method UnconfirmedPlayerCount:Int()
+		Local count:Int
+		Local mask:UInt = _unconfirmedPlayers
+		While mask <> 0
+			count :+ Int(mask & 1)
+			mask :Shr 1
+		Wend
+		Return count
+	End Method
+
+	Rem
+	bbdoc: Returns whether hash mismatch recovery is pending.
+	about: Recovery does not itself block stepping while prediction budget remains.
+	End Rem
+	Method NeedsStateSync:Int()
+		Return _needsStateSync
+	End Method
+
+	Method StateSyncMismatchFrame:UInt()
+		Return _stateSyncMismatchFrame
+	End Method
+End Struct
+
+Rem
 bbdoc: Configuration for a #TRollbackSession.
 about: Player counts from two through #ROLLBACK_SESSION_MAX_PLAYERS are supported.
 End Rem
@@ -431,6 +530,40 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		For Local slot:Int = 0 Until _remoteHashValid.Length
 			_remoteHashValid[slot] = False
 		Next
+	End Method
+
+	Method BuildStepInfo:SRollbackStepInfo()
+		Local hasConfirmed:Int = _rollback.HasConfirmedFrame()
+		Local confirmed:UInt
+		Local inputFrame:UInt
+		If hasConfirmed Then
+			confirmed = _rollback.ConfirmedFrame()
+			inputFrame = confirmed + 1
+		Else
+			inputFrame = 0
+		End If
+
+		Local predictionLead:Int = RollbackFrameDelta(_currentFrame, inputFrame)
+		If predictionLead < 0 Then predictionLead = 0
+		Local unconfirmedPlayers:UInt
+		For Local player:Int = 0 Until _config.playerCount
+			Local input:SRollbackInput
+			If Not _rollback.GetInput(player, inputFrame, input) Or input.Status() <> ERollbackInputStatus.Confirmed Then
+				unconfirmedPlayers :| 1:UInt Shl player
+			End If
+		Next
+
+		Local status:ERollbackStepStatus
+		If _failed Then
+			status = ERollbackStepStatus.Failed
+		Else If Not _running Then
+			status = ERollbackStepStatus.Stopped
+		Else If predictionLead > _config.maxPredictionFrames Then
+			status = ERollbackStepStatus.WaitingForInputs
+		Else
+			status = ERollbackStepStatus.Ready
+		End If
+		Return New SRollbackStepInfo(status, _currentFrame, hasConfirmed, confirmed, predictionLead, inputFrame, unconfirmedPlayers, _needsStateSync, _stateSyncMismatchFrame)
 	End Method
 
 	Function ValidConfig:Int(simulation:IRollbackSimulation, config:SRollbackSessionConfig)
@@ -907,6 +1040,17 @@ Type TRollbackSession Implements IRollbackEffectWriter
 
 	Method CurrentFrame:UInt()
 		Return _currentFrame
+	End Method
+
+	Rem
+	bbdoc: Returns detailed readiness, prediction lead, and blocking-player data.
+	End Rem
+	Method StepInfo:SRollbackStepInfo()
+		Return BuildStepInfo()
+	End Method
+
+	Method StepStatus:ERollbackStepStatus()
+		Return BuildStepInfo().Status()
 	End Method
 
 	Method HasRemoteFrame:Int(player:Int)

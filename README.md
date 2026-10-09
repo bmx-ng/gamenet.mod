@@ -22,7 +22,7 @@ Transport-independent building blocks for real-time multiplayer games.
   reusable two- to eight-player deterministic timeline with input delay,
   redundant delivery, re-simulation, confirmed presentation effects, state
   hashes, bounded authority-based resynchronisation, and explicit failure
-  diagnostics.
+  and input-stall diagnostics.
 
 Planned transport modules include `GameNet.GameKit`. Each backend imports
 `GameNet.Core`; the core module does not depend on a native networking library

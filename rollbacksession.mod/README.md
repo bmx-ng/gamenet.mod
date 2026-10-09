@@ -53,6 +53,21 @@ and a full peer mesh also increases message fan-out. Larger games should
 normally use an authoritative server and snapshots rather than one shared
 rollback timeline.
 
+## Step status and stalls
+
+`CanStep` remains the simple readiness check. `StepStatus` distinguishes a
+ready session from one which is stopped, fatally failed, or waiting because it
+has consumed its prediction allowance. `StepInfo` returns the same status plus
+the current and confirmed frames, prediction lead, earliest unconfirmed input
+frame, and a player bitmask identifying whose input is not yet confirmed.
+
+`SRollbackStepInfo` is a value Struct and gathering it has no side effects or
+managed allocation. It also reports pending state synchronisation separately:
+recovery is important match-health information, but it does not block stepping
+while prediction budget remains. These details allow a game to distinguish a
+normal short network stall from a stopped match or simulation fault and show
+useful diagnostics without reproducing rollback-buffer logic.
+
 ## Desync recovery
 
 `authorityPlayer` in `SRollbackSessionConfig` selects the peer whose state wins

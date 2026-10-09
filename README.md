@@ -23,6 +23,9 @@ Transport-independent building blocks for real-time multiplayer games.
   redundant delivery, re-simulation, confirmed presentation effects, state
   hashes, bounded authority-based resynchronisation, and explicit failure
   and input-stall diagnostics.
+- `GameNet.Replay` optionally records bounded confirmed-input timelines with
+  opaque initial state, verification hashes, cursor playback, and portable
+  serialization.
 
 Planned transport modules include `GameNet.GameKit`. Each backend imports
 `GameNet.Core`; the core module does not depend on a native networking library

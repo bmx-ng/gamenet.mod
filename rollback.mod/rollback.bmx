@@ -93,15 +93,18 @@ Struct SRollbackInput
 	Field _status:ERollbackInputStatus
 	Field _payload:SPacketView
 
+	Public
+	Method New()
+	End Method
+
+	Rem
+	bbdoc: Creates a borrowed input value, including for deterministic playback.
+	End Rem
 	Method New(frame:UInt, player:Int, status:ERollbackInputStatus, payload:SPacketView)
 		_frame = frame
 		_player = player
 		_status = status
 		_payload = payload
-	End Method
-
-	Public
-	Method New()
 	End Method
 
 	Method Frame:UInt()

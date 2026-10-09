@@ -68,6 +68,10 @@ while prediction budget remains. These details allow a game to distinguish a
 normal short network stall from a stopped match or simulation fault and show
 useful diagnostics without reproducing rollback-buffer logic.
 
+`GetConfirmedInput` exposes one player's borrowed confirmed input for a frame.
+It can be used to feed `GameNet.Replay` after advancing a separate recording
+cursor through newly confirmed frames.
+
 ## Desync recovery
 
 `authorityPlayer` in `SRollbackSessionConfig` selects the peer whose state wins

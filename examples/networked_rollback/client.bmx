@@ -235,6 +235,10 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 						If game And game.IsRunning() Then game.ReceiveInputs(1 - localPlayer, event.Payload())
 					Case ROLLBACK_MSG_HASH
 						If game And game.IsRunning() Then game.ReceiveHash(event.Payload())
+					Case ROLLBACK_MSG_STATE_SYNC_REQUEST
+						If game And game.IsRunning() And game.IsAuthority() Then game.SendStateSyncResponse(session, hostPeer, ROLLBACK_MSG_STATE_SYNC_RESPONSE, ROLLBACK_CONTROL_CHANNEL, event.Payload(), Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
+					Case ROLLBACK_MSG_STATE_SYNC_RESPONSE
+						If game And game.IsRunning() Then game.ReceiveStateSync(event.Payload())
 					Case ROLLBACK_MSG_STOP
 						Local player:Int
 						If DecodePlayerAssignment(event.Payload(), player) Then status = "Player " + (player + 1) + " left; waiting for opponent"
@@ -252,6 +256,9 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		Local n:Size_T = EncodePing(Byte Ptr(packetBuffer), Size_T(packetBuffer.Length), UInt(now))
 		session.Send(hostPeer, ROLLBACK_MSG_PING, ROLLBACK_CONTROL_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(packetBuffer), n)
 		lastPingSend = now
+	End If
+	If game And game.IsRunning() And game.NeedsStateSync() Then
+		game.SendStateSyncRequest(session, hostPeer, ROLLBACK_MSG_STATE_SYNC_REQUEST, ROLLBACK_CONTROL_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 	End If
 
 	Local axisX:Float = controls.X(), axisY:Float = controls.Y()
@@ -290,7 +297,7 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 			lastInputSend = now
 		End If
 		If game.Failed() Then
-			status = "Rollback simulation failed"
+			status = "Rollback simulation failed (reason " + Int(game.FailureReason()) + ")"
 			If Not reportedSimulationFailure Then
 				Print status + " at frame " + game.CurrentFrame()
 				reportedSimulationFailure = True
@@ -332,7 +339,7 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		DrawText "Frame " + game.CurrentFrame() + "    peer " + game.RemoteSimulationFrame() + "    confirmed " + ConfirmedFrameText(game), 12, 72
 		DrawText "Rollbacks " + game.RollbackCount() + "    last " + game.LastRollbackDepth() + "    largest " + game.LargestRollbackDepth(), 12, 92
 		DrawText "Predicted " + game.PredictedFrames() + "    matched " + game.PredictionMatches() + "    mismatched " + game.PredictionMismatches(), 12, 112
-		DrawText "Hashes " + game.HashesChecked() + "    desyncs " + game.HashMismatches() + "    rejected inputs " + game.RejectedInputs(), 12, 132
+		DrawText "Hashes " + game.HashesChecked() + "    desyncs " + game.HashMismatches() + "    state syncs " + game.StateSyncCount(), 12, 132
 		DrawText "Confirmed effects " + confirmedEffects + "    latest frame " + lastConfirmedEffectFrame + "    dropped " + game.DroppedConfirmedEffects(), 12, 152
 	Else
 		DrawText "Waiting for a two-player match", 12, 72

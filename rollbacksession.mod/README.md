@@ -9,7 +9,9 @@ It provides:
 - redundant frame-numbered input batches;
 - bounded prediction, restoration, and re-simulation;
 - rollback-safe presentation effects released only after confirmation;
-- confirmed-state hash exchange and desync counters; and
+- confirmed-state hash exchange, desync detection, and bounded authoritative
+  state resynchronisation;
+- explicit fatal failure reasons; and
 - rollback, prediction, rejection, and peer-frame diagnostics.
 
 The game implements `IRollbackSimulation`. It remains responsible for encoding
@@ -33,3 +35,31 @@ input message to `ReceiveInputs`, and each hash message to `ReceiveHash`.
 `SendInputs` and `SendReadyHash` are convenience methods for sending through a
 `TNetSession`; `WriteInputs` and `WriteReadyHash` are also available when the
 application needs to compose or route messages itself.
+
+## Desync recovery
+
+`authorityPlayer` in `SRollbackSessionConfig` selects the peer whose state wins
+if confirmed hashes disagree. It defaults to player zero. A non-authority peer
+then reports `NeedsStateSync`; it can send `WriteStateSyncRequest` or
+`SendStateSyncRequest`. The authority answers with `WriteStateSyncResponse` or
+`SendStateSyncResponse`, and the requester routes the reply to
+`ReceiveStateSync`. Responses echo the mismatch frame so a delayed response to
+an older request cannot replace a newer recovery attempt.
+
+The response contains one confirmed opaque game-state snapshot. The receiver
+validates its hash, restores it, and replays retained inputs to its current
+frame without restarting the match. Request and response messages must use a
+reliable ordered channel. The response occupies `StateSyncPacketCapacity`
+bytes at most (`maxStateSize + 17`), so both the caller's packet buffer and the
+underlying session payload limit must be at least that large. This initial
+facility intentionally does not fragment large states.
+
+The authority is a convergence policy, not a cheat-prevention mechanism: if
+its state is wrong, that state still wins. Nor can recovery retract an
+irreversible presentation effect the application has already consumed. Games
+should continue to keep deterministic state compact and use confirmed effects
+for presentation work.
+
+`Failed` now has a corresponding `FailureReason`. Invalid network packets are
+simply rejected; a failure reason is set only when the local deterministic
+simulation can no longer safely continue.

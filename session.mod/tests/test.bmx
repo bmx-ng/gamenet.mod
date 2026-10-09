@@ -93,4 +93,58 @@ Check(event.Code() = Int(ESessionRejectCode.ProtocolViolation), "malformed packe
 host.Close()
 raw.Close()
 
+' A pending handshake is disconnected when its configured deadline expires.
+pair = TLoopbackPair.Create(16, 1200)
+host = TNetSession.CreateHost(pair.First(), APP_ID, APP_VERSION, 1, 1200)
+raw = pair.Second()
+Check(host.ConfigureHealth(New SSessionHealthConfig(100, 0, 0, 0)), "configure handshake timeout")
+raw.Poll(rawEvent) ' Consume the raw endpoint's connection event without sending Hello.
+Check(Not host.PollAt(event, 0), "register pending handshake")
+Check(host.PollAt(event, 100) And event.Kind() = ESessionEventKind.Left, "handshake timeout disconnects")
+Check(event.Code() = Int(ESessionDisconnectCode.HandshakeTimeout), "handshake timeout code")
+host.Close()
+raw.Close()
+
+' Active peers exchange internal probes without exposing application messages.
+pair = TLoopbackPair.Create(32, 1200)
+host = TNetSession.CreateHost(pair.First(), APP_ID, APP_VERSION, 1, 1200)
+client = TNetSession.CreateClient(pair.Second(), APP_ID, APP_VERSION, Null, 0, 1, 1200)
+Local probeConfig:SSessionHealthConfig = New SSessionHealthConfig(500, 0, 100, 250)
+Check(host.ConfigureHealth(probeConfig) And client.ConfigureHealth(probeConfig), "configure active probes")
+Check(Not client.PollAt(event, 0), "client sends timed hello")
+Check(host.PollAt(event, 0) And event.Kind() = ESessionEventKind.JoinRequested, "timed host join request")
+hostPeer = event.Peer()
+Check(host.Accept(hostPeer) = ETransportResult.Ok, "accept timed peer")
+Check(host.PollAt(event, 0) And event.Kind() = ESessionEventKind.Joined, "timed host joined")
+Check(client.PollAt(event, 0) And event.Kind() = ESessionEventKind.Joined, "timed client joined")
+clientPeer = event.Peer()
+Check(Not client.PollAt(event, 100), "client sends health probe")
+Check(Not host.PollAt(event, 140), "host replies and sends health probe")
+Check(Not client.PollAt(event, 200), "client receives probe sample")
+Local clientHealth:SSessionPeerHealth
+Check(client.GetPeerHealth(clientPeer, 200, clientHealth), "query client health")
+Check(clientHealth.IsActive() And clientHealth.HasRoundTrip() And clientHealth.RoundTripMillis() = 100, "measure probe round trip")
+Check(clientHealth.ProbesSent() >= 1 And clientHealth.ProbesReceived() = 1 And clientHealth.ProbesLost() = 0, "count successful probes")
+Check(clientHealth.FramesSent() > 0 And clientHealth.FramesReceived() > 0 And clientHealth.BytesSent() > 0 And clientHealth.BytesReceived() > 0, "count session traffic")
+Check(Not client.PollAt(event, 500), "expire unanswered probe")
+Check(client.GetPeerHealth(clientPeer, 500, clientHealth) And clientHealth.ProbesLost() = 1, "count lost probe")
+host.Close()
+client.Close()
+
+' Idle timeout is independent of probes and uses any received session frame.
+pair = TLoopbackPair.Create(16, 1200)
+host = TNetSession.CreateHost(pair.First(), APP_ID, APP_VERSION, 1, 1200)
+client = TNetSession.CreateClient(pair.Second(), APP_ID, APP_VERSION, Null, 0, 1, 1200)
+Local idleConfig:SSessionHealthConfig = New SSessionHealthConfig(500, 100, 0, 0)
+Check(host.ConfigureHealth(idleConfig) And client.ConfigureHealth(idleConfig), "configure idle timeout")
+Check(Not client.PollAt(event, 0), "idle client hello")
+Check(host.PollAt(event, 0) And event.Kind() = ESessionEventKind.JoinRequested, "idle host join request")
+hostPeer = event.Peer()
+Check(host.Accept(hostPeer) = ETransportResult.Ok, "accept idle peer")
+Check(host.PollAt(event, 0) And event.Kind() = ESessionEventKind.Joined, "idle host joined")
+Check(client.PollAt(event, 0) And event.Kind() = ESessionEventKind.Joined, "idle client joined")
+Check(host.PollAt(event, 100) And event.Kind() = ESessionEventKind.Left And event.Code() = Int(ESessionDisconnectCode.IdleTimeout), "idle timeout disconnects")
+host.Close()
+client.Close()
+
 Print "GameNet.Session tests passed"

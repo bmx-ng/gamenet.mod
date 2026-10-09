@@ -10,8 +10,9 @@ Transport-independent building blocks for real-time multiplayer games.
   local multiplayer, and protocol development.
 - `GameNet.ENet` provides UDP networking through ENet for direct and hosted
   connections.
-- `GameNet.Session` adds a versioned handshake and framed application messages
-  above any GameNet transport.
+- `GameNet.Session` adds a versioned handshake, framed application messages,
+  optional handshake/idle timeouts, keepalive probes, and per-peer health
+  statistics above any GameNet transport.
 - `GameNet.Snapshot` optionally provides bounded snapshot history, server-clock
   estimation, and adaptive jitter delay for real-time presentation.
 - `GameNet.Prediction` optionally retains sequenced input for authoritative

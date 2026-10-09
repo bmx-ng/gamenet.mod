@@ -146,6 +146,12 @@ While relaySession.IsOpen()
 					Case ROLLBACK_MSG_HASH
 						If event.Channel() = ROLLBACK_CONTROL_CHANNEL And event.Delivery() = EDeliveryMode.ReliableOrdered And event.Payload().Length() = 8 Then ForwardRelayMessage(player, event)
 
+					Case ROLLBACK_MSG_STATE_SYNC_REQUEST
+						If player <> 0 And event.Channel() = ROLLBACK_CONTROL_CHANNEL And event.Delivery() = EDeliveryMode.ReliableOrdered And event.Payload().Length() = 9 Then ForwardRelayMessage(player, event)
+
+					Case ROLLBACK_MSG_STATE_SYNC_RESPONSE
+						If player = 0 And event.Channel() = ROLLBACK_CONTROL_CHANNEL And event.Delivery() = EDeliveryMode.ReliableOrdered And event.Payload().Length() >= 18 Then ForwardRelayMessage(player, event)
+
 					Case ROLLBACK_MSG_PING
 						Local token:UInt
 						If DecodePing(event.Payload(), token) Then

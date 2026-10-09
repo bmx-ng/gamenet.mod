@@ -37,9 +37,12 @@ frame.
 
 Every thirty confirmed frames, clients exchange a hash of deterministic state.
 The HUD reports relay round-trip time, confirmed and peer frames, rollback
-depth, prediction outcomes, rejected inputs, checked hashes, and desyncs.
+depth, prediction outcomes, checked hashes, desyncs, and completed state syncs.
+If the hashes disagree, player one requests a confirmed snapshot from player
+zero and replays its retained inputs from that state. The match continues
+without reconnecting or restarting.
 
-The relay treats rollback input and hash payloads as opaque messages. Their
+The relay treats rollback input, hash, and state-sync payloads as opaque messages. Their
 encoding, redundant delivery, prediction limits, rollback, hash checking, and
 diagnostic counters are owned by `GameNet.RollbackSession`.
 

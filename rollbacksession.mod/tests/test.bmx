@@ -10,6 +10,7 @@ End Function
 Type TTestSimulation Implements IRollbackSimulation, IRollbackEffectSimulation
 	Field position0:Int
 	Field position1:Int
+	Field corruptFrame:Int = -1
 
 	Method SaveState:Size_T(buffer:Byte Ptr, capacity:Size_T)
 		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
@@ -44,6 +45,7 @@ Type TTestSimulation Implements IRollbackSimulation, IRollbackEffectSimulation
 		If inputs.Length <> 2 Or inputs[0].Payload().Length() <> 1 Or inputs[1].Payload().Length() <> 1 Then Return False
 		position0 :+ Int(Byte(inputs[0].Payload().Data()[0]))
 		position1 :+ Int(Byte(inputs[1].Payload().Data()[0]))
+		If corruptFrame >= 0 And frame = UInt(corruptFrame) Then position0 :+ 1000
 		Local payload:Byte[1]
 		payload[0] = Byte(frame & $ff)
 		If effects Then Return effects.Emit(1, Byte Ptr(payload), 1)
@@ -88,9 +90,15 @@ Local plainNeutral:Byte[1]
 Check(plainSession.Start(Byte Ptr(plainNeutral), 1), "start simulation without effect source")
 Check(plainSession.Step(Byte Ptr(plainNeutral), 1), "advance simulation without effect source")
 Check(plainSession.PendingConfirmedEffects() = 0, "effect support remains optional")
+Check(plainSession.FailureReason() = ERollbackSessionFailure.None, "healthy session has no failure reason")
+
+Local invalidStartSession:TRollbackSession = TRollbackSession.Create(New TPlainSimulation, plainConfig)
+Check(Not invalidStartSession.Start(Null, 0), "reject invalid initial input")
+Check(invalidStartSession.Failed() And invalidStartSession.FailureReason() = ERollbackSessionFailure.InvalidStartInput, "report invalid start failure")
 
 Local simulation0:TTestSimulation = New TTestSimulation
 Local simulation1:TTestSimulation = New TTestSimulation
+simulation1.corruptFrame = 70
 Local config0:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 128, 8, 1, 3, 8, 12, 10, 16)
 Local config1:SRollbackSessionConfig = New SRollbackSessionConfig(2, 1, 128, 8, 1, 3, 8, 12, 10, 16)
 Local session0:TRollbackSession = TRollbackSession.Create(simulation0, config0)
@@ -105,6 +113,7 @@ Local effectCount0:Int
 Local effectCount1:Int
 Local lastEffectFrame0:UInt
 Local lastEffectFrame1:UInt
+Local observedStateSync:Int
 
 For Local frame:Int = 0 Until 150
 	Local input0:Byte[1]
@@ -127,6 +136,19 @@ For Local frame:Int = 0 Until 150
 	If hashLength0 > 0 Then Check(session1.ReceiveHash(New SPacketView(Byte Ptr(packet0), hashLength0)), "receive player zero hash")
 	Local hashLength1:Size_T = session1.WriteReadyHash(Byte Ptr(packet1), Size_T(packet1.Length))
 	If hashLength1 > 0 Then Check(session0.ReceiveHash(New SPacketView(Byte Ptr(packet1), hashLength1)), "receive player one hash")
+
+	If session1.NeedsStateSync() Then
+		observedStateSync = True
+		Local requestLength:Size_T = session1.WriteStateSyncRequest(Byte Ptr(packet1), Size_T(packet1.Length))
+		Check(requestLength > 0, "write state-sync request")
+		Local responseLength:Size_T = session0.WriteStateSyncResponse(New SPacketView(Byte Ptr(packet1), requestLength), Byte Ptr(packet0), Size_T(packet0.Length))
+		Check(responseLength > 0, "write authoritative state-sync response")
+		packet0[Int(responseLength) - 1] :~ 1
+		Check(Not session1.ReceiveStateSync(New SPacketView(Byte Ptr(packet0), responseLength)), "reject corrupt state-sync response")
+		Check(session1.NeedsStateSync() And Not session1.Failed(), "corrupt response does not change session state")
+		packet0[Int(responseLength) - 1] :~ 1
+		Check(session1.ReceiveStateSync(New SPacketView(Byte Ptr(packet0), responseLength)), "apply authoritative state sync")
+	End If
 
 	Local effect:SRollbackEffect
 	While session0.PollConfirmedEffect(effect)
@@ -165,10 +187,12 @@ Check(simulation0.position0 = simulation1.position0 And simulation0.position1 = 
 Check(session0.RollbackCount() > 0 And session1.RollbackCount() > 0, "rollback occurred")
 Check(session0.PredictionMismatches() > 0 And session1.PredictionMismatches() > 0, "prediction mismatch detected")
 Check(session0.HashesChecked() > 0 And session1.HashesChecked() > 0, "confirmed hashes checked")
-Check(session0.HashMismatches() = 0 And session1.HashMismatches() = 0, "no deterministic desync")
+Check(observedStateSync And session1.StateSyncCount() = 1 And Not session1.NeedsStateSync(), "deterministic desync recovered without restart")
+Check(session0.HashMismatches() > 0 And session1.HashMismatches() > 0, "deterministic desync detected by both peers")
 Check(effectCount0 = 151 And effectCount1 = 151, "confirmed effects released once")
 Check(lastEffectFrame0 = 150 And lastEffectFrame1 = 150, "confirmed effects cover simulated frames")
 Check(session0.DroppedConfirmedEffects() = 0 And session1.DroppedConfirmedEffects() = 0, "confirmed effect queue did not overflow")
 Check(Not session0.Failed() And Not session1.Failed(), "sessions remained healthy")
+Check(session0.FailureReason() = ERollbackSessionFailure.None And session1.FailureReason() = ERollbackSessionFailure.None, "recovered sessions have no fatal failure")
 
 Print "GameNet.RollbackSession tests passed"

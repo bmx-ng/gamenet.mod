@@ -119,6 +119,25 @@ Interface IRollbackEffectSimulation
 End Interface
 
 Rem
+bbdoc: Identifies why a rollback session entered its fatal failed state.
+about: Malformed or irrelevant network packets are rejected without failing the
+session. These values describe failures which prevent deterministic simulation
+from safely continuing.
+End Rem
+Enum ERollbackSessionFailure:Int
+	None
+	InvalidStartInput
+	StateSaveFailed
+	StateLoadFailed
+	InputPredictionFailed
+	InputHistoryUnavailable
+	LocalInputRejected
+	SimulationFailed
+	RollbackHistoryUnavailable
+	StateSyncApplyFailed
+End Enum
+
+Rem
 bbdoc: Configuration for a #TRollbackSession.
 End Rem
 Struct SRollbackSessionConfig
@@ -135,8 +154,9 @@ Struct SRollbackSessionConfig
 	Field maxEffectsPerFrame:Int
 	Field maxEffectSize:Size_T
 	Field confirmedEffectCapacity:Int
+	Field authorityPlayer:Int
 
-	Method New(playerCount:Int, localPlayer:Int, historyFrames:Int, maxStateSize:Size_T, maxInputSize:Size_T, inputDelayFrames:Int = 3, maxPredictionFrames:Int = 8, redundantInputFrames:Int = 12, hashInterval:UInt = 30, hashQueueSize:Int = 32, maxEffectsPerFrame:Int = 8, maxEffectSize:Size_T = 64, confirmedEffectCapacity:Int = 64)
+	Method New(playerCount:Int, localPlayer:Int, historyFrames:Int, maxStateSize:Size_T, maxInputSize:Size_T, inputDelayFrames:Int = 3, maxPredictionFrames:Int = 8, redundantInputFrames:Int = 12, hashInterval:UInt = 30, hashQueueSize:Int = 32, maxEffectsPerFrame:Int = 8, maxEffectSize:Size_T = 64, confirmedEffectCapacity:Int = 64, authorityPlayer:Int = 0)
 		Self.playerCount = playerCount
 		Self.localPlayer = localPlayer
 		Self.historyFrames = historyFrames
@@ -150,6 +170,7 @@ Struct SRollbackSessionConfig
 		Self.maxEffectsPerFrame = maxEffectsPerFrame
 		Self.maxEffectSize = maxEffectSize
 		Self.confirmedEffectCapacity = confirmedEffectCapacity
+		Self.authorityPlayer = authorityPlayer
 	End Method
 End Struct
 
@@ -172,6 +193,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	Field _priorInputs:SPacketView[]
 	Field _running:Int
 	Field _failed:Int
+	Field _failureReason:ERollbackSessionFailure
 	Field _currentFrame:UInt
 	Field _totalFrames:Long
 	Field _hasRemoteFrame:Int
@@ -185,6 +207,10 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	Field _rejectedInputs:Int
 	Field _hashesChecked:Int
 	Field _hashMismatches:Int
+	Field _needsStateSync:Int
+	Field _stateSyncRequestSent:Int
+	Field _stateSyncMismatchFrame:UInt
+	Field _stateSyncCount:Int
 	Field _hasLastHashSent:Int
 	Field _lastHashSent:UInt
 	Field _remoteHashValid:Byte[]
@@ -234,10 +260,18 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		End If
 	End Method
 
+	Method Fail:Int(reason:ERollbackSessionFailure)
+		_failed = True
+		_failureReason = reason
+		_recordingEffects = False
+		Return False
+	End Method
+
 	Method SaveCurrentState:Int(frame:UInt)
 		Local length:Size_T = _simulation.SaveState(_stateBuffer, _config.maxStateSize)
-		If length = 0 Or length > _config.maxStateSize Then Return False
-		Return _rollback.SaveState(frame, _stateBuffer, length)
+		If length = 0 Or length > _config.maxStateSize Then Return Fail(ERollbackSessionFailure.StateSaveFailed)
+		If Not _rollback.SaveState(frame, _stateBuffer, length) Then Return Fail(ERollbackSessionFailure.StateSaveFailed)
+		Return True
 	End Method
 
 	Method FindPriorInput:SPacketView(player:Int, frame:UInt)
@@ -313,11 +347,11 @@ Type TRollbackSession Implements IRollbackEffectWriter
 				Local previous:SPacketView = _priorInputs[player]
 				If previous.IsEmpty() Then previous = FindPriorInput(player, frame)
 				Local length:Size_T = _simulation.PredictInput(player, frame, previous, _inputBuffer, _config.maxInputSize)
-				If length = 0 Or length > _config.maxInputSize Or Not _rollback.PredictInput(player, frame, _inputBuffer, length) Then Return False
-				If Not _rollback.GetInput(player, frame, input) Then Return False
+				If length = 0 Or length > _config.maxInputSize Or Not _rollback.PredictInput(player, frame, _inputBuffer, length) Then Return Fail(ERollbackSessionFailure.InputPredictionFailed)
+				If Not _rollback.GetInput(player, frame, input) Then Return Fail(ERollbackSessionFailure.InputHistoryUnavailable)
 				If Not replacePredictions Then _predictedFrames :+ 1
 			Else If Not found Then
-				Return False
+				Return Fail(ERollbackSessionFailure.InputHistoryUnavailable)
 			End If
 			_frameInputs[player] = input
 			_priorInputs[player] = input.Payload()
@@ -329,9 +363,10 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		If Not _rollback.NeedsRollback() Then Return True
 		Local startFrame:UInt = _rollback.RollbackFrame()
 		Local state:SPacketView
-		If Not _rollback.GetState(startFrame, state) Or Not _simulation.LoadState(state) Then Return False
+		If Not _rollback.GetState(startFrame, state) Then Return Fail(ERollbackSessionFailure.RollbackHistoryUnavailable)
+		If Not _simulation.LoadState(state) Then Return Fail(ERollbackSessionFailure.StateLoadFailed)
 		Local depth:Int = RollbackFrameDelta(_currentFrame, startFrame)
-		If depth < 0 Or depth >= _rollback.Capacity() Then Return False
+		If depth < 0 Or depth >= _rollback.Capacity() Then Return Fail(ERollbackSessionFailure.RollbackHistoryUnavailable)
 		For Local player:Int = 0 Until _config.playerCount
 			_priorInputs[player] = FindPriorInput(player, startFrame)
 		Next
@@ -346,7 +381,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 				simulated = _simulation.SimulateFrame(frame, _frameInputs)
 			End If
 			EndEffectFrame()
-			If Not simulated Then Return False
+			If Not simulated Then Return Fail(ERollbackSessionFailure.SimulationFailed)
 		Next
 		If Not SaveCurrentState(_currentFrame) Then Return False
 		_rollback.ClearRollback()
@@ -362,11 +397,24 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		For Local slot:Int = 0 Until _remoteHashValid.Length
 			If Not _remoteHashValid[slot] Then Continue
 			If RollbackFrameAfter(_remoteHashFrames[slot], confirmedStateFrame) Or RollbackFrameAfter(_remoteHashFrames[slot], _currentFrame) Then Continue
-			Local localHash:UInt = _rollback.StateHash(_remoteHashFrames[slot])
-			If localHash <> 0 Then
+			Local localHash:UInt
+			If _rollback.GetStateHash(_remoteHashFrames[slot], localHash) Then
 				_hashesChecked :+ 1
-				If localHash <> _remoteHashes[slot] Then _hashMismatches :+ 1
+				If localHash <> _remoteHashes[slot] Then
+					_hashMismatches :+ 1
+					If _config.localPlayer <> _config.authorityPlayer Then
+						_needsStateSync = True
+						_stateSyncRequestSent = False
+						_stateSyncMismatchFrame = _remoteHashFrames[slot]
+					End If
+				End If
 			End If
+			_remoteHashValid[slot] = False
+		Next
+	End Method
+
+	Method ClearRemoteHashes()
+		For Local slot:Int = 0 Until _remoteHashValid.Length
 			_remoteHashValid[slot] = False
 		Next
 	End Method
@@ -378,7 +426,8 @@ Type TRollbackSession Implements IRollbackEffectWriter
 			And config.maxPredictionFrames >= 0 And config.maxPredictionFrames < config.historyFrames ..
 			And config.redundantInputFrames >= 1 And config.redundantInputFrames <= 255 ..
 			And config.hashQueueSize >= 1 And config.maxEffectsPerFrame >= 1 ..
-			And config.maxEffectSize >= 1 And config.confirmedEffectCapacity >= 1
+			And config.maxEffectSize >= 1 And config.confirmedEffectCapacity >= 1 ..
+			And config.authorityPlayer >= 0 And config.authorityPlayer < config.playerCount
 	End Function
 
 	Public
@@ -439,12 +488,14 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	param initialInput: Neutral local input used for the configured delay frames.
 	End Rem
 	Method Start:Int(initialInput:Byte Ptr, inputLength:Size_T)
-		If inputLength = 0 Or inputLength > _config.maxInputSize Or Not initialInput Then Return False
+		_running = False
+		_failed = False
+		_failureReason = ERollbackSessionFailure.None
+		If inputLength = 0 Or inputLength > _config.maxInputSize Or Not initialInput Then Return Fail(ERollbackSessionFailure.InvalidStartInput)
 		_rollback.Clear()
 		_currentFrame = 0
 		_totalFrames = 0
 		_running = True
-		_failed = False
 		_hasRemoteFrame = False
 		_remoteSimulationFrame = 0
 		_rollbackCount = 0
@@ -456,6 +507,10 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		_rejectedInputs = 0
 		_hashesChecked = 0
 		_hashMismatches = 0
+		_needsStateSync = False
+		_stateSyncRequestSent = False
+		_stateSyncMismatchFrame = 0
+		_stateSyncCount = 0
 		_hasLastHashSent = False
 		_recordingEffects = False
 		_confirmedEffectRead = 0
@@ -470,10 +525,9 @@ Type TRollbackSession Implements IRollbackEffectWriter
 			_effectFrameValid[slot] = False
 		Next
 		For Local frame:UInt = 0 Until UInt(_config.inputDelayFrames)
-			If _rollback.ConfirmInput(_config.localPlayer, frame, initialInput, inputLength) = ERollbackConfirmResult.Rejected Then Return False
+			If _rollback.ConfirmInput(_config.localPlayer, frame, initialInput, inputLength) = ERollbackConfirmResult.Rejected Then Return Fail(ERollbackSessionFailure.LocalInputRejected)
 		Next
 		If Not SaveCurrentState(0) Then
-			_failed = True
 			Return False
 		End If
 		Return True
@@ -500,19 +554,16 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	Method Step:Int(localInput:Byte Ptr, inputLength:Size_T)
 		If Not CanStep() Or inputLength = 0 Or inputLength > _config.maxInputSize Or Not localInput Then Return False
 		If Not PerformRollback() Or Not SaveCurrentState(_currentFrame) Then
-			_failed = True
 			Return False
 		End If
 		Local scheduledFrame:UInt = _currentFrame + UInt(_config.inputDelayFrames)
 		If _rollback.ConfirmInput(_config.localPlayer, scheduledFrame, localInput, inputLength) = ERollbackConfirmResult.Rejected Then
-			_failed = True
-			Return False
+			Return Fail(ERollbackSessionFailure.LocalInputRejected)
 		End If
 		For Local player:Int = 0 Until _config.playerCount
 			_priorInputs[player] = New SPacketView
 		Next
 		If Not PrepareInputs(_currentFrame, False) Then
-			_failed = True
 			Return False
 		End If
 		BeginEffectFrame(_currentFrame)
@@ -524,13 +575,11 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		End If
 		EndEffectFrame()
 		If Not simulated Then
-			_failed = True
-			Return False
+			Return Fail(ERollbackSessionFailure.SimulationFailed)
 		End If
 		_currentFrame :+ 1
 		_totalFrames :+ 1
 		If Not SaveCurrentState(_currentFrame) Then
-			_failed = True
 			Return False
 		End If
 		CheckRemoteHashes()
@@ -631,8 +680,8 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Local frame:UInt = (confirmedStateFrame / _config.hashInterval) * _config.hashInterval
 		If frame = 0 Or RollbackFrameAfter(frame, _currentFrame) Then Return 0
 		If _hasLastHashSent And Not RollbackFrameAfter(frame, _lastHashSent) Then Return 0
-		Local hash:UInt = _rollback.StateHash(frame)
-		If hash = 0 Then Return 0
+		Local hash:UInt
+		If Not _rollback.GetStateHash(frame, hash) Then Return 0
 		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
 		writer.WriteUInt32(frame)
 		writer.WriteUInt32(hash)
@@ -675,12 +724,153 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Return result
 	End Method
 
+	Rem
+	bbdoc: Writes a request for an authoritative confirmed state snapshot.
+	about: The request is available only after this non-authority peer detects a
+	confirmed hash mismatch. Send it reliably and in order. Calling this method
+	does not mark the request as sent, so custom transports may retry it.
+	End Rem
+	Method WriteStateSyncRequest:Size_T(buffer:Byte Ptr, capacity:Size_T)
+		If Not _running Or _failed Or Not _needsStateSync Or _config.localPlayer = _config.authorityPlayer Or Not buffer Then Return 0
+		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
+		writer.WriteUInt8(1)
+		writer.WriteUInt32(_currentFrame)
+		writer.WriteUInt32(_stateSyncMismatchFrame)
+		If writer.Failed() Then Return 0
+		Return writer.Position()
+	End Method
+
+	Rem
+	bbdoc: Sends a pending state-sync request reliably and in order.
+	End Rem
+	Method SendStateSyncRequest:ETransportResult(session:TNetSession, peer:SNetPeer, messageType:UInt, channel:UInt, packetBuffer:Byte Ptr, packetCapacity:Size_T)
+		If _stateSyncRequestSent Then Return ETransportResult.WouldBlock
+		Local length:Size_T = WriteStateSyncRequest(packetBuffer, packetCapacity)
+		If length = 0 Then Return ETransportResult.WouldBlock
+		Local result:ETransportResult = session.Send(peer, messageType, channel, EDeliveryMode.ReliableOrdered, packetBuffer, length)
+		If result = ETransportResult.Ok Then _stateSyncRequestSent = True
+		Return result
+	End Method
+
+	Rem
+	bbdoc: Writes an authoritative confirmed state in response to @request.
+	about: Only the configured authority can produce a response. The selected
+	state is no newer than either its confirmed timeline or the requester's
+	current frame. The complete state must fit in @buffer.
+	End Rem
+	Method WriteStateSyncResponse:Size_T(request:SPacketView, buffer:Byte Ptr, capacity:Size_T)
+		If Not _running Or _failed Or _config.localPlayer <> _config.authorityPlayer Or Not buffer Or Not _rollback.HasConfirmedFrame() Then Return 0
+		Local reader:SPacketReader = New SPacketReader(request)
+		Local version:UInt
+		Local requesterFrame:UInt
+		Local mismatchFrame:UInt
+		If Not reader.ReadUInt8(version) Or version <> 1 Or Not reader.ReadUInt32(requesterFrame) Or Not reader.ReadUInt32(mismatchFrame) Or reader.Remaining() <> 0 Then Return 0
+
+		Local stateFrame:UInt = _rollback.ConfirmedFrame() + 1
+		If RollbackFrameAfter(stateFrame, requesterFrame) Then stateFrame = requesterFrame
+		Local state:SPacketView
+		Local hash:UInt
+		If Not _rollback.GetState(stateFrame, state) Or Not _rollback.GetStateHash(stateFrame, hash) Then Return 0
+
+		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
+		writer.WriteUInt8(1)
+		writer.WriteUInt32(stateFrame)
+		writer.WriteUInt32(mismatchFrame)
+		writer.WriteUInt32(UInt(state.Length()))
+		writer.WriteUInt32(hash)
+		writer.WriteBytes(state.Data(), state.Length())
+		If writer.Failed() Then Return 0
+		Return writer.Position()
+	End Method
+
+	Rem
+	bbdoc: Sends an authoritative state-sync response reliably and in order.
+	End Rem
+	Method SendStateSyncResponse:ETransportResult(session:TNetSession, peer:SNetPeer, messageType:UInt, channel:UInt, request:SPacketView, packetBuffer:Byte Ptr, packetCapacity:Size_T)
+		Local length:Size_T = WriteStateSyncResponse(request, packetBuffer, packetCapacity)
+		If length = 0 Then Return ETransportResult.Failed
+		Return session.Send(peer, messageType, channel, EDeliveryMode.ReliableOrdered, packetBuffer, length)
+	End Method
+
+	Rem
+	bbdoc: Applies an authoritative state-sync response and replays to the present.
+	about: Only a non-authority peer accepts the response. Packet integrity is
+	validated before the simulation or rollback history is changed.
+	End Rem
+	Method ReceiveStateSync:Int(packet:SPacketView)
+		If Not _running Or _failed Or Not _needsStateSync Or _config.localPlayer = _config.authorityPlayer Then Return False
+		Local reader:SPacketReader = New SPacketReader(packet)
+		Local version:UInt
+		Local stateFrame:UInt
+		Local mismatchFrame:UInt
+		Local length:UInt
+		Local expectedHash:UInt
+		If Not reader.ReadUInt8(version) Or version <> 1 Or Not reader.ReadUInt32(stateFrame) Or Not reader.ReadUInt32(mismatchFrame) Or mismatchFrame <> _stateSyncMismatchFrame Or Not reader.ReadUInt32(length) Or Not reader.ReadUInt32(expectedHash) Then Return False
+		If length < 1 Or length > UInt(_config.maxStateSize) Or Size_T(length) <> reader.Remaining() Then Return False
+		Local state:SPacketView = reader.RemainingView()
+		If RollbackHash32(state.Data(), state.Length()) <> expectedHash Then Return False
+		Local depth:Int = RollbackFrameDelta(_currentFrame, stateFrame)
+		If depth < 0 Or depth >= _rollback.Capacity() Then Return False
+
+		If Not _simulation.LoadState(state) Then Return Fail(ERollbackSessionFailure.StateLoadFailed)
+		If Not _rollback.SaveState(stateFrame, state.Data(), state.Length()) Then Return Fail(ERollbackSessionFailure.StateSyncApplyFailed)
+		_rollback.ClearRollback()
+		For Local player:Int = 0 Until _config.playerCount
+			_priorInputs[player] = FindPriorInput(player, stateFrame)
+		Next
+		For Local offset:Int = 0 Until depth
+			Local frame:UInt = stateFrame + UInt(offset)
+			If Not SaveCurrentState(frame) Or Not PrepareInputs(frame, True) Then Return False
+			BeginEffectFrame(frame)
+			Local simulated:Int
+			If _effectSimulation Then
+				simulated = _effectSimulation.SimulateFrame(frame, _frameInputs, Self)
+			Else
+				simulated = _simulation.SimulateFrame(frame, _frameInputs)
+			End If
+			EndEffectFrame()
+			If Not simulated Then Return Fail(ERollbackSessionFailure.SimulationFailed)
+		Next
+		If Not SaveCurrentState(_currentFrame) Then Return False
+
+		_needsStateSync = False
+		_stateSyncRequestSent = False
+		_stateSyncCount :+ 1
+		ClearRemoteHashes()
+		CommitConfirmedEffects()
+		Return True
+	End Method
+
 	Method IsRunning:Int()
 		Return _running
 	End Method
 
 	Method Failed:Int()
 		Return _failed
+	End Method
+
+	Method FailureReason:ERollbackSessionFailure()
+		Return _failureReason
+	End Method
+
+	Method IsAuthority:Int()
+		Return _config.localPlayer = _config.authorityPlayer
+	End Method
+
+	Method NeedsStateSync:Int()
+		Return _needsStateSync
+	End Method
+
+	Method StateSyncMismatchFrame:UInt()
+		Return _stateSyncMismatchFrame
+	End Method
+
+	Method StateSyncCount:Int()
+		Return _stateSyncCount
+	End Method
+
+	Method StateSyncPacketCapacity:Size_T()
+		Return _config.maxStateSize + 17
 	End Method
 
 	Method CurrentFrame:UInt()

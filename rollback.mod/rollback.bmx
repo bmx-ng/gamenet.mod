@@ -320,11 +320,27 @@ Type TRollbackBuffer
 	End Method
 
 	Rem
+	bbdoc: Gets the stored state's stable hash.
+	returns: False when the state is unavailable.
+	End Rem
+	Method GetStateHash:Int(frame:UInt, hash:UInt Var)
+		If Not HasFrame(frame) Or _stateLengths[FrameSlot(frame)] = 0 Then
+			hash = 0
+			Return False
+		End If
+		hash = _stateHashes[FrameSlot(frame)]
+		Return True
+	End Method
+
+	Rem
 	bbdoc: Returns the stored state's stable hash, or zero when unavailable.
+	about: Prefer #GetStateHash when zero must be distinguishable from an
+	available hash whose value happens to be zero.
 	End Rem
 	Method StateHash:UInt(frame:UInt)
-		If Not HasFrame(frame) Then Return 0
-		Return _stateHashes[FrameSlot(frame)]
+		Local hash:UInt
+		If Not GetStateHash(frame, hash) Then Return 0
+		Return hash
 	End Method
 
 	Rem

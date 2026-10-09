@@ -12,6 +12,8 @@ Transport-independent building blocks for real-time multiplayer games.
   connections.
 - `GameNet.Session` adds a versioned handshake and framed application messages
   above any GameNet transport.
+- `GameNet.Snapshot` optionally provides bounded snapshot history, server-clock
+  estimation, and adaptive jitter delay for real-time presentation.
 
 Planned transport modules include `GameNet.GameKit`. Each backend imports
 `GameNet.Core`; the core module does not depend on a native networking library

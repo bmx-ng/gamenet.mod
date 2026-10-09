@@ -5,13 +5,16 @@ Import BRL.PolledInput
 Import Max2D.VirtualJoystick
 Import GameNet.Session
 Import GameNet.ENet
+Import GameNet.Snapshot
 
 Include "protocol.bmx"
 
 Const INPUT_INTERVAL:Int = 33
 Const SNAPSHOT_BUFFER_SIZE:Int = 32
-Const INTERPOLATION_DELAY_TICKS:Float = 8.0
-Const SERVER_TICK_MILLIS:Float = 1000.0 / 60.0
+Const SNAPSHOT_STATE_SIZE:Size_T = 8
+Const SERVER_TICKS_PER_SECOND:Double = 60.0
+Const SNAPSHOT_BASE_DELAY_TICKS:Float = 2.0
+Const SNAPSHOT_MAXIMUM_DELAY_TICKS:Float = 12.0
 Const CORRECTION_RATE:Float = 10.0
 
 Struct SClientPlayer
@@ -27,11 +30,7 @@ Struct SClientPlayer
 	Field initialized:Int
 End Struct
 
-Global snapshotTicks:UInt[AUTHORITATIVE_MAX_PLAYERS * SNAPSHOT_BUFFER_SIZE]
-Global snapshotXs:Float[AUTHORITATIVE_MAX_PLAYERS * SNAPSHOT_BUFFER_SIZE]
-Global snapshotYs:Float[AUTHORITATIVE_MAX_PLAYERS * SNAPSHOT_BUFFER_SIZE]
-Global snapshotWrites:Int[AUTHORITATIVE_MAX_PLAYERS]
-Global snapshotCounts:Int[AUTHORITATIVE_MAX_PLAYERS]
+Global snapshotStateBuffer:Byte[SNAPSHOT_STATE_SIZE]
 
 Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int, seconds:Float)
 	Local moveX:Float = Float(inputX) / 127.0
@@ -48,43 +47,35 @@ Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int, seconds:Fl
 	y = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, y))
 End Function
 
-Function StoreSnapshot(entityIndex:Int, tick:UInt, x:Float, y:Float)
-	Local writeIndex:Int = snapshotWrites[entityIndex]
-	Local snapshotIndex:Int = entityIndex * SNAPSHOT_BUFFER_SIZE + writeIndex
-	snapshotTicks[snapshotIndex] = tick
-	snapshotXs[snapshotIndex] = x
-	snapshotYs[snapshotIndex] = y
-	snapshotWrites[entityIndex] = (writeIndex + 1) Mod SNAPSHOT_BUFFER_SIZE
-	If snapshotCounts[entityIndex] < SNAPSHOT_BUFFER_SIZE Then snapshotCounts[entityIndex] :+ 1
+Function StorePositionSnapshot:Int(timeline:TSnapshotTimeline, tick:UInt, x:Float, y:Float)
+	Local writer:SPacketWriter = New SPacketWriter(Byte Ptr(snapshotStateBuffer), Size_T(snapshotStateBuffer.Length))
+	writer.WriteFloat32(x)
+	writer.WriteFloat32(y)
+	If writer.Failed() Then Return False
+	Return timeline.Add(tick, Byte Ptr(snapshotStateBuffer), writer.Position())
 End Function
 
-Function SampleSnapshot:Int(entityIndex:Int, renderTick:Float, x:Float Var, y:Float Var)
-	Local count:Int = snapshotCounts[entityIndex]
-	If count = 0 Then Return False
-	Local oldest:Int = (snapshotWrites[entityIndex] - count + SNAPSHOT_BUFFER_SIZE) Mod SNAPSHOT_BUFFER_SIZE
-	Local previousIndex:Int = entityIndex * SNAPSHOT_BUFFER_SIZE + oldest
-	x = snapshotXs[previousIndex]
-	y = snapshotYs[previousIndex]
-	If renderTick <= Float(snapshotTicks[previousIndex]) Then Return True
+Function DecodePositionState:Int(state:SPacketView, x:Float Var, y:Float Var)
+	Local reader:SPacketReader = New SPacketReader(state)
+	Return reader.ReadFloat32(x) And reader.ReadFloat32(y) And reader.Remaining() = 0
+End Function
 
-	For Local offset:Int = 1 Until count
-		Local ringIndex:Int = (oldest + offset) Mod SNAPSHOT_BUFFER_SIZE
-		Local currentIndex:Int = entityIndex * SNAPSHOT_BUFFER_SIZE + ringIndex
-		Local currentTick:Float = Float(snapshotTicks[currentIndex])
-		If renderTick <= currentTick Then
-			Local previousTick:Float = Float(snapshotTicks[previousIndex])
-			Local span:Float = currentTick - previousTick
-			Local blend:Float
-			If span > 0.0 Then blend = Max(0.0, Min(1.0, (renderTick - previousTick) / span))
-			x = snapshotXs[previousIndex] + (snapshotXs[currentIndex] - snapshotXs[previousIndex]) * blend
-			y = snapshotYs[previousIndex] + (snapshotYs[currentIndex] - snapshotYs[previousIndex]) * blend
-			Return True
-		End If
-		previousIndex = currentIndex
-	Next
-
-	x = snapshotXs[previousIndex]
-	y = snapshotYs[previousIndex]
+Function SamplePositionSnapshot:Int(timeline:TSnapshotTimeline, renderTick:Double, x:Float Var, y:Float Var)
+	Local sample:SSnapshotSample
+	If Not timeline.Sample(renderTick, sample) Then Return False
+	Local fromX:Float
+	Local fromY:Float
+	If Not DecodePositionState(sample.FromState(), fromX, fromY) Then Return False
+	If Not sample.IsInterpolated() Then
+		x = fromX
+		y = fromY
+		Return True
+	End If
+	Local toX:Float
+	Local toY:Float
+	If Not DecodePositionState(sample.ToState(), toX, toY) Then Return False
+	x = fromX + (toX - fromX) * sample.Blend()
+	y = fromY + (toY - fromY) * sample.Blend()
 	Return True
 End Function
 
@@ -115,6 +106,12 @@ Local hostPeer:SNetPeer
 Local status:String = "Connecting to " + serverAddress + ":" + serverPort + "..."
 Local ownEntityId:UInt
 Local players:SClientPlayer[AUTHORITATIVE_MAX_PLAYERS]
+Local snapshotTimelines:TSnapshotTimeline[AUTHORITATIVE_MAX_PLAYERS]
+For Local index:Int = 0 Until snapshotTimelines.Length
+	snapshotTimelines[index] = TSnapshotTimeline.Create(SNAPSHOT_BUFFER_SIZE, SNAPSHOT_STATE_SIZE)
+Next
+Local snapshotClock:TSnapshotClock = TSnapshotClock.Create(SERVER_TICKS_PER_SECOND)
+Local snapshotDelay:TSnapshotDelay = TSnapshotDelay.Create(SERVER_TICKS_PER_SECOND, SNAPSHOT_BASE_DELAY_TICKS, SNAPSHOT_MAXIMUM_DELAY_TICKS)
 Local inputSequence:UInt
 Local acknowledgedInput:UInt
 Local serverTick:UInt
@@ -126,8 +123,6 @@ Local inputHistoryTime:Int[64]
 Local inputHistoryWrite:Int
 Local inputHistoryCount:Int
 Local nextInputTime:Int = MilliSecs()
-Local latestServerTick:UInt
-Local latestServerTickTime:Int
 Local timingWindowStart:Int = MilliSecs()
 Local framesInWindow:Int
 Local snapshotsInWindow:Int
@@ -155,13 +150,12 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 				If DecodeEntity(event.Payload(), ownEntityId) And ownEntityId >= 1 And ownEntityId <= UInt(players.Length) Then
 					For Local index:Int = 0 Until players.Length
 						players[index] = New SClientPlayer
-						snapshotCounts[index] = 0
-						snapshotWrites[index] = 0
+						snapshotTimelines[index].Clear()
 					Next
 					inputHistoryWrite = 0
 					inputHistoryCount = 0
-					latestServerTick = 0
-					latestServerTickTime = 0
+					snapshotClock.Clear()
+					snapshotDelay.Clear()
 					status = "Joined as player " + ownEntityId + "; waiting for spawn"
 				Else
 					status = "Joined with an invalid entity ID"
@@ -178,9 +172,10 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 				acknowledgedInput = 0
 				For Local index:Int = 0 Until players.Length
 					players[index] = New SClientPlayer
-					snapshotCounts[index] = 0
-					snapshotWrites[index] = 0
+					snapshotTimelines[index].Clear()
 				Next
+				snapshotClock.Clear()
+				snapshotDelay.Clear()
 
 			Case ESessionEventKind.Message
 				Select event.MessageType()
@@ -211,8 +206,7 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 							If DecodeEntity(event.Payload(), entityId) And entityId >= 1 And entityId <= UInt(players.Length) Then
 								Local index:Int = Int(entityId) - 1
 								players[index] = New SClientPlayer
-								snapshotCounts[index] = 0
-								snapshotWrites[index] = 0
+								snapshotTimelines[index].Clear()
 							End If
 						End If
 
@@ -228,10 +222,9 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 								players[index].active = True
 								players[index].x = x
 								players[index].y = y
-								StoreSnapshot(index, tick, x, y)
-								If latestServerTick = 0 Or tick > latestServerTick Then
-									latestServerTick = tick
-									latestServerTickTime = frameNow
+								StorePositionSnapshot(snapshotTimelines[index], tick, x, y)
+								If snapshotClock.Observe(tick, frameNow) Then
+									snapshotDelay.Observe(tick, frameNow)
 								End If
 								If entityId = ownEntityId Then
 									serverTick = tick
@@ -318,12 +311,11 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		session.Send(hostPeer, MSG_INPUT, GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(inputBuffer), length)
 	End If
 
-	If latestServerTick > 0 Then
-		Local estimatedServerTick:Float = Float(latestServerTick) + Float(Max(0, frameNow - latestServerTickTime)) / SERVER_TICK_MILLIS
-		Local renderTick:Float = estimatedServerTick - INTERPOLATION_DELAY_TICKS
+	If snapshotClock.IsObserved() Then
+		Local renderTick:Double = snapshotClock.Estimate(frameNow) - Double(snapshotDelay.DelayTicks())
 		For Local index:Int = 0 Until players.Length
 			If index = ownIndex Or Not players[index].active Then Continue
-			If SampleSnapshot(index, renderTick, players[index].renderX, players[index].renderY) Then players[index].initialized = True
+			If SamplePositionSnapshot(snapshotTimelines[index], renderTick, players[index].renderX, players[index].renderY) Then players[index].initialized = True
 		Next
 	End If
 
@@ -353,7 +345,8 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 	DrawText "Input " + inputSequence + "  acknowledged " + acknowledgedInput + "  server tick " + serverTick, 12, 52
 	DrawText "FPS " + displayedFramesPerSecond + "  snapshots/s " + displayedSnapshotsPerSecond, 12, 72
 	DrawText "Largest frame gap " + frameGap + " ms  snapshot gap " + snapshotGap + " ms", 12, 92
-	DrawText "WASD / arrows / on-screen stick", 12, 112
+	DrawText "Snapshot buffer " + Int(snapshotDelay.DelayMillis()) + " ms", 12, 112
+	DrawText "WASD / arrows / on-screen stick", 12, 132
 	controls.Render()
 	Flip 1
 Wend

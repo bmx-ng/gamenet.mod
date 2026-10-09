@@ -5,8 +5,8 @@ This example deliberately separates game authority from presentation:
 - `server.bmx` is a headless ENet host. It owns the simulation and the players'
   positions, with room for four clients.
 - `client.bmx` sends sequenced input, predicts its own movement immediately,
-  reconciles it with the host, and interpolates other players from a short
-  snapshot buffer.
+  reconciles it with the host, and uses `GameNet.Snapshot` to interpolate other
+  players from a bounded snapshot timeline.
 - `protocol.bmx` is shared wire-format code built from `GameNet.Core` packet
   readers and writers.
 
@@ -44,6 +44,6 @@ network access.
 
 The example sends snapshots at 60 Hz. Local prediction keeps input responsive;
 small reconciliation errors are corrected over several frames rather than by
-snapping. Other players are rendered eight server ticks (about 133 ms) behind
-the newest estimated tick, allowing ordinary jitter to be interpolated. The
-host's positions remain authoritative throughout.
+snapping. Other players use an adaptive render delay: it expands when snapshot
+arrivals are late, then slowly recovers toward a two-tick baseline. The host's
+positions remain authoritative throughout.

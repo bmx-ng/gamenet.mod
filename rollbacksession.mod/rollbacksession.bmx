@@ -1110,6 +1110,21 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Return _rollback.ConfirmedFrame()
 	End Method
 
+	Rem
+	bbdoc: Returns one player's borrowed confirmed input for @frame.
+	about: This is suitable for deterministic replay recording. The view remains
+	valid only until the rollback session changes.
+	End Rem
+	Method GetConfirmedInput:Int(player:Int, frame:UInt, payload:SPacketView Var)
+		Local input:SRollbackInput
+		If Not _rollback.GetInput(player, frame, input) Or input.Status() <> ERollbackInputStatus.Confirmed Then
+			payload = New SPacketView
+			Return False
+		End If
+		payload = input.Payload()
+		Return True
+	End Method
+
 	Method RollbackCount:Int()
 		Return _rollbackCount
 	End Method

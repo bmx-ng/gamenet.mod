@@ -2,6 +2,7 @@ SuperStrict
 
 Framework BRL.StandardIO
 Import GameNet.RollbackSession
+Import GameNet.Replay
 
 Function Check(condition:Int, message:String)
 	If Not condition Then Throw message
@@ -16,6 +17,18 @@ Function WriteSingleInputBatch:Size_T(buffer:Byte Ptr, capacity:Size_T, simulate
 	writer.WriteUInt8(UInt(value) & $ff:UInt)
 	If writer.Failed() Then Return 0
 	Return writer.Position()
+End Function
+
+Function RecordConfirmedFrames:Int(tape:TReplayTape, session:TRollbackSession, nextFrame:UInt Var, inputs:SPacketView[])
+	If inputs.Length <> session.PlayerCount() Then Return False
+	While session.HasConfirmedFrame() And Not RollbackFrameAfter(nextFrame, session.ConfirmedFrame()) And RollbackFrameAfter(session.CurrentFrame(), nextFrame)
+		For Local player:Int = 0 Until inputs.Length
+			If Not session.GetConfirmedInput(player, nextFrame, inputs[player]) Then Return False
+		Next
+		If Not tape.Append(nextFrame, inputs) Then Return False
+		nextFrame :+ 1
+	Wend
+	Return True
 End Function
 
 Type TTestSimulation Implements IRollbackSimulation, IRollbackEffectSimulation
@@ -193,6 +206,11 @@ Local effectCount1:Int
 Local lastEffectFrame0:UInt
 Local lastEffectFrame1:UInt
 Local observedStateSync:Int
+Local replayTape:TReplayTape = TReplayTape.Create(2, 151, 8, 1)
+Local replayInitialState:Byte[8]
+Check(replayTape.Begin(0, Byte Ptr(replayInitialState), Size_T(replayInitialState.Length)), "begin rollback replay recording")
+Local replayInputs:SPacketView[2]
+Local nextReplayFrame:UInt
 
 For Local frame:Int = 0 Until 150
 	Local input0:Byte[1]
@@ -229,6 +247,7 @@ For Local frame:Int = 0 Until 150
 		packet0[Int(responseLength) - 1] :~ 1
 		Check(session1.ReceiveStateSync(New SPacketView(Byte Ptr(packet0), responseLength)), "apply authoritative state sync")
 	End If
+	Check(RecordConfirmedFrames(replayTape, session0, nextReplayFrame, replayInputs), "record newly confirmed rollback frames")
 
 	Local effect:SRollbackEffect
 	While session0.PollConfirmedEffect(effect)
@@ -252,6 +271,7 @@ Check(session1.ReceiveInputs(0, New SPacketView(Byte Ptr(packet0), finalLength0)
 Check(session0.ReceiveInputs(1, New SPacketView(Byte Ptr(packet1), finalLength1)), "receive final player one inputs")
 Local zero:Byte[1]
 Check(session0.Step(Byte Ptr(zero), 1) And session1.Step(Byte Ptr(zero), 1), "resolve final rollback")
+Check(RecordConfirmedFrames(replayTape, session0, nextReplayFrame, replayInputs), "record final confirmed rollback frames")
 
 Local finalEffect:SRollbackEffect
 While session0.PollConfirmedEffect(finalEffect)
@@ -274,6 +294,23 @@ Check(lastEffectFrame0 = 150 And lastEffectFrame1 = 150, "confirmed effects cove
 Check(session0.DroppedConfirmedEffects() = 0 And session1.DroppedConfirmedEffects() = 0, "confirmed effect queue did not overflow")
 Check(Not session0.Failed() And Not session1.Failed(), "sessions remained healthy")
 Check(session0.FailureReason() = ERollbackSessionFailure.None And session1.FailureReason() = ERollbackSessionFailure.None, "recovered sessions have no fatal failure")
+Check(replayTape.FrameCount() = 151, "record every confirmed rollback frame")
+
+Local replaySimulation:TTestSimulation = New TTestSimulation
+Local recordedInitialState:SPacketView
+Check(replayTape.InitialState(recordedInitialState) And replaySimulation.LoadState(recordedInitialState), "restore recorded initial state")
+Local replayCursor:SReplayCursor = replayTape.Cursor()
+Local replayFrame:SReplayFrame
+Local simulatedInputs:SRollbackInput[2]
+While replayCursor.Next(replayFrame)
+	For Local player:Int = 0 Until simulatedInputs.Length
+		Local replayInput:SPacketView
+		Check(replayFrame.Input(player, replayInput), "read recorded rollback input")
+		simulatedInputs[player] = New SRollbackInput(replayFrame.Frame(), player, ERollbackInputStatus.Confirmed, replayInput)
+	Next
+	Check(replaySimulation.SimulateFrame(replayFrame.Frame(), simulatedInputs), "play recorded rollback frame")
+Wend
+Check(replaySimulation.position0 = simulation0.position0 And replaySimulation.position1 = simulation0.position1, "replay reproduces final rollback state")
 
 ' Exercise the same orchestration with three peers. Inputs travel all-to-all,
 ' while hashes and recovery use player zero as a hub/authority.

@@ -6,10 +6,10 @@ Import Max2D.VirtualJoystick
 Import GameNet.Session
 Import GameNet.ENet
 Import GameNet.Snapshot
+Import GameNet.Prediction
 
 Include "protocol.bmx"
 
-Const INPUT_INTERVAL:Int = 33
 Const SNAPSHOT_BUFFER_SIZE:Int = 32
 Const SNAPSHOT_STATE_SIZE:Size_T = 8
 Const SERVER_TICKS_PER_SECOND:Double = 60.0
@@ -31,6 +31,7 @@ Struct SClientPlayer
 End Struct
 
 Global snapshotStateBuffer:Byte[SNAPSHOT_STATE_SIZE]
+Global predictionInputBuffer:Byte[AUTHORITATIVE_INPUT_PAYLOAD_SIZE]
 
 Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int, seconds:Float)
 	Local moveX:Float = Float(inputX) / 127.0
@@ -112,17 +113,12 @@ For Local index:Int = 0 Until snapshotTimelines.Length
 Next
 Local snapshotClock:TSnapshotClock = TSnapshotClock.Create(SERVER_TICKS_PER_SECOND)
 Local snapshotDelay:TSnapshotDelay = TSnapshotDelay.Create(SERVER_TICKS_PER_SECOND, SNAPSHOT_BASE_DELAY_TICKS, SNAPSHOT_MAXIMUM_DELAY_TICKS)
+Local inputHistory:TPredictionHistory = TPredictionHistory.Create(AUTHORITATIVE_INPUT_HISTORY_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE)
 Local inputSequence:UInt
 Local acknowledgedInput:UInt
 Local serverTick:UInt
-Local inputBuffer:Byte[16]
-Local inputHistorySequence:UInt[64]
-Local inputHistoryX:Int[64]
-Local inputHistoryY:Int[64]
-Local inputHistoryTime:Int[64]
-Local inputHistoryWrite:Int
-Local inputHistoryCount:Int
-Local nextInputTime:Int = MilliSecs()
+Local inputBatchBuffer:Byte[512]
+Local predictionAccumulator:Float
 Local timingWindowStart:Int = MilliSecs()
 Local framesInWindow:Int
 Local snapshotsInWindow:Int
@@ -152,8 +148,9 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 						players[index] = New SClientPlayer
 						snapshotTimelines[index].Clear()
 					Next
-					inputHistoryWrite = 0
-					inputHistoryCount = 0
+					inputHistory.Clear()
+					inputSequence = 0
+					predictionAccumulator = 0.0
 					snapshotClock.Clear()
 					snapshotDelay.Clear()
 					status = "Joined as player " + ownEntityId + "; waiting for spawn"
@@ -170,6 +167,8 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 				ownEntityId = 0
 				inputSequence = 0
 				acknowledgedInput = 0
+				inputHistory.Clear()
+				predictionAccumulator = 0.0
 				For Local index:Int = 0 Until players.Length
 					players[index] = New SClientPlayer
 					snapshotTimelines[index].Clear()
@@ -229,21 +228,18 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 								If entityId = ownEntityId Then
 									serverTick = tick
 									acknowledgedInput = acknowledged
+									inputHistory.Acknowledge(acknowledged)
 									Local previousRenderX:Float = players[index].renderX
 									Local previousRenderY:Float = players[index].renderY
 									Local reconciledX:Float = x
 									Local reconciledY:Float = y
-									Local oldestInput:Int = (inputHistoryWrite - inputHistoryCount + inputHistorySequence.Length) Mod inputHistorySequence.Length
-									For Local offset:Int = 0 Until inputHistoryCount
-										Local historyIndex:Int = (oldestInput + offset) Mod inputHistorySequence.Length
-										If inputHistorySequence[historyIndex] <= acknowledged Then Continue
-										Local inputEndTime:Int = frameNow
-										If offset + 1 < inputHistoryCount Then
-											Local nextHistoryIndex:Int = (oldestInput + offset + 1) Mod inputHistorySequence.Length
-											inputEndTime = inputHistoryTime[nextHistoryIndex]
+									For Local historyIndex:Int = 0 Until inputHistory.Count()
+										Local input:SPredictionInput
+										Local replayX:Int
+										Local replayY:Int
+										If inputHistory.Get(historyIndex, input) And DecodeMovementInput(input.Payload(), replayX, replayY) Then
+											ApplyInput(reconciledX, reconciledY, replayX, replayY, AUTHORITATIVE_SIMULATION_STEP)
 										End If
-										Local inputMillis:Int = Min(INPUT_INTERVAL, Max(0, inputEndTime - inputHistoryTime[historyIndex]))
-										ApplyInput(reconciledX, reconciledY, inputHistoryX[historyIndex], inputHistoryY[historyIndex], Float(inputMillis) / 1000.0)
 									Next
 									players[index].predictedX = reconciledX
 									players[index].predictedY = reconciledY
@@ -290,25 +286,32 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 	Local ownIndex:Int = Int(ownEntityId) - 1
 	If ownIndex >= 0 And ownIndex < players.Length And players[ownIndex].active And players[ownIndex].initialized Then
 		Local frameSeconds:Float = Float(frameElapsed) / 1000.0
-		ApplyInput(players[ownIndex].predictedX, players[ownIndex].predictedY, currentInputX, currentInputY, frameSeconds)
+		predictionAccumulator :+ frameSeconds
+		Local addedInput:Int
+		While predictionAccumulator >= AUTHORITATIVE_SIMULATION_STEP
+			predictionAccumulator :- AUTHORITATIVE_SIMULATION_STEP
+			Local nextSequence:UInt = inputSequence + 1
+			Local inputLength:Size_T = EncodeMovementInput(Byte Ptr(predictionInputBuffer), Size_T(predictionInputBuffer.Length), currentInputX, currentInputY)
+			If Not inputHistory.Add(nextSequence, Byte Ptr(predictionInputBuffer), inputLength) Then
+				status = "Prediction input history full"
+				predictionAccumulator = 0.0
+				Exit
+			End If
+			inputSequence = nextSequence
+			addedInput = True
+			ApplyInput(players[ownIndex].predictedX, players[ownIndex].predictedY, currentInputX, currentInputY, AUTHORITATIVE_SIMULATION_STEP)
+		Wend
 		Local correctionBlend:Float = Max(0.0, 1.0 - CORRECTION_RATE * frameSeconds)
 		players[ownIndex].correctionX :* correctionBlend
 		players[ownIndex].correctionY :* correctionBlend
 		players[ownIndex].renderX = Max(PLAYER_RADIUS, Min(WORLD_WIDTH - PLAYER_RADIUS, players[ownIndex].predictedX + players[ownIndex].correctionX))
 		players[ownIndex].renderY = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, players[ownIndex].predictedY + players[ownIndex].correctionY))
-	End If
-	If ownIndex >= 0 And ownIndex < players.Length And players[ownIndex].active And hostPeer.IsValid() And frameNow >= nextInputTime Then
-		nextInputTime = frameNow + INPUT_INTERVAL
-		inputSequence :+ 1
-		Local historyIndex:Int = inputHistoryWrite
-		inputHistorySequence[historyIndex] = inputSequence
-		inputHistoryX[historyIndex] = currentInputX
-		inputHistoryY[historyIndex] = currentInputY
-		inputHistoryTime[historyIndex] = frameNow
-		inputHistoryWrite = (inputHistoryWrite + 1) Mod inputHistorySequence.Length
-		If inputHistoryCount < inputHistorySequence.Length Then inputHistoryCount :+ 1
-		Local length:Size_T = EncodeInput(Byte Ptr(inputBuffer), Size_T(inputBuffer.Length), inputSequence, currentInputX, currentInputY)
-		session.Send(hostPeer, MSG_INPUT, GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(inputBuffer), length)
+		If addedInput And hostPeer.IsValid() Then
+			Local length:Size_T = EncodeInputBatch(Byte Ptr(inputBatchBuffer), Size_T(inputBatchBuffer.Length), inputHistory)
+			If length > 0 Then session.Send(hostPeer, MSG_INPUT, GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(inputBatchBuffer), length)
+		End If
+	Else
+		predictionAccumulator = 0.0
 	End If
 
 	If snapshotClock.IsObserved() Then

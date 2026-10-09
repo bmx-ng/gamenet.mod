@@ -2,6 +2,7 @@ SuperStrict
 
 Framework BRL.StandardIO
 Import GameNet.Core
+Import GameNet.Prediction
 
 Include "protocol.bmx"
 
@@ -9,17 +10,35 @@ Function Check(condition:Int, message:String)
 	If Not condition Then Throw message
 End Function
 
-Local buffer:Byte[32]
+Local buffer:Byte[512]
 
-Local length:Size_T = EncodeInput(Byte Ptr(buffer), Size_T(buffer.Length), 42, -127, 91)
-Check(length = 6, "input size")
-Local sequence:UInt
+Local length:Size_T = EncodeMovementInput(Byte Ptr(buffer), Size_T(buffer.Length), -127, 91)
+Check(length = 2, "movement input size")
 Local axisX:Int
 Local axisY:Int
-Check(DecodeInput(New SPacketView(Byte Ptr(buffer), length), sequence, axisX, axisY), "decode input")
-Check(sequence = 42 And axisX = -127 And axisY = 91, "input values")
-Check(Not DecodeInput(New SPacketView(Byte Ptr(buffer), length - 1), sequence, axisX, axisY), "reject truncated input")
-Check(Not DecodeInput(New SPacketView(Byte Ptr(buffer), length + 1), sequence, axisX, axisY), "reject input trailing data")
+Check(DecodeMovementInput(New SPacketView(Byte Ptr(buffer), length), axisX, axisY), "decode movement input")
+Check(axisX = -127 And axisY = 91, "movement input values")
+Check(Not DecodeMovementInput(New SPacketView(Byte Ptr(buffer), length - 1), axisX, axisY), "reject truncated movement input")
+Check(Not DecodeMovementInput(New SPacketView(Byte Ptr(buffer), length + 1), axisX, axisY), "reject movement input trailing data")
+
+Local history:TPredictionHistory = TPredictionHistory.Create(AUTHORITATIVE_INPUT_HISTORY_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE)
+Local payload:Byte[AUTHORITATIVE_INPUT_PAYLOAD_SIZE]
+Check(EncodeMovementInput(Byte Ptr(payload), Size_T(payload.Length), -10, 20) = AUTHORITATIVE_INPUT_PAYLOAD_SIZE, "encode first history input")
+Check(history.Add(41, Byte Ptr(payload), Size_T(payload.Length)), "add first history input")
+Check(EncodeMovementInput(Byte Ptr(payload), Size_T(payload.Length), 30, -40) = AUTHORITATIVE_INPUT_PAYLOAD_SIZE, "encode second history input")
+Check(history.Add(42, Byte Ptr(payload), Size_T(payload.Length)), "add second history input")
+length = EncodeInputBatch(Byte Ptr(buffer), Size_T(buffer.Length), history)
+Check(length = 13, "input batch size")
+Local sequences:UInt[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
+Local axisXs:Int[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
+Local axisYs:Int[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
+Local inputCount:Int
+Check(DecodeInputBatch(New SPacketView(Byte Ptr(buffer), length), sequences, axisXs, axisYs, inputCount), "decode input batch")
+Check(inputCount = 2 And sequences[0] = 41 And sequences[1] = 42, "input batch sequences")
+Check(axisXs[0] = -10 And axisYs[0] = 20 And axisXs[1] = 30 And axisYs[1] = -40, "input batch values")
+Check(Not DecodeInputBatch(New SPacketView(Byte Ptr(buffer), length - 1), sequences, axisXs, axisYs, inputCount), "reject truncated input batch")
+Check(Not DecodeInputBatch(New SPacketView(Byte Ptr(buffer), length + 1), sequences, axisXs, axisYs, inputCount), "reject input batch trailing data")
+Check(EncodeInputBatch(Byte Ptr(buffer), 8, history) = 0, "bounded input batch encode")
 
 length = EncodeEntity(Byte Ptr(buffer), Size_T(buffer.Length), 3)
 Check(length = 4, "entity size")

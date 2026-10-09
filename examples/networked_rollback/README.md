@@ -10,12 +10,15 @@ Build and start the relay:
 
 ```sh
 bmk makeapp server.bmx
-./server [port] [input-delay-ms] [drop-every-nth-input-packet]
+./server [port] [latency-ms] [loss-percent] [jitter-ms] [random-seed]
 ```
 
-The default port is 46341. Delay and packet dropping default to zero. For
-example, `./server 46341 100 7` adds 100 ms to relayed input and drops every
-seventh input packet.
+The default port is 46341. Network impairment defaults to zero and the seed
+defaults to one. For example, `./server 46341 100 5 20 7` adds 100 ms base
+one-way latency, up to 20 ms symmetric jitter, and 5% loss to outbound
+unreliable traffic. The reusable `GameNet.Impairment` decorator makes the run
+repeatable for a given seed and call sequence while leaving reliable control
+messages intact.
 
 Start two clients:
 

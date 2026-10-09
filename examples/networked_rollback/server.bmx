@@ -4,11 +4,9 @@ Framework BRL.StandardIO
 Import BRL.System
 Import GameNet.Session
 Import GameNet.ENet
+Import GameNet.Impairment
 
 Include "protocol.bmx"
-
-Const RELAY_DELAY_SLOTS:Int = 256
-Const RELAY_DELAY_PACKET_SIZE:Int = 128
 
 Struct SRelayPlayer
 	Field peer:SNetPeer
@@ -19,14 +17,10 @@ Global relaySession:TNetSession
 Global relayPlayers:SRelayPlayer[ROLLBACK_PLAYER_COUNT]
 Global relayBuffer:Byte[64]
 Global relayMatchId:UInt
-Global relayInputPacketCount:UInt
 Global relayDelayMillis:Int
-Global relayDropEvery:Int
-Global relayDelayedValid:Byte[RELAY_DELAY_SLOTS]
-Global relayDelayedAt:Int[RELAY_DELAY_SLOTS]
-Global relayDelayedPeer:SNetPeer[RELAY_DELAY_SLOTS]
-Global relayDelayedLength:Size_T[RELAY_DELAY_SLOTS]
-Global relayDelayedStorage:Byte[RELAY_DELAY_SLOTS * RELAY_DELAY_PACKET_SIZE]
+Global relayJitterMillis:Int
+Global relayLossPercent:Int
+Global relaySeed:UInt = 1
 
 Function RelayPlayerForPeer:Int(peer:SNetPeer)
 	For Local player:Int = 0 Until relayPlayers.Length
@@ -72,47 +66,26 @@ Function ForwardRelayMessage(player:Int, event:SSessionEvent)
 End Function
 
 Function ForwardRelayInput(player:Int, event:SSessionEvent)
-	Local other:Int = OtherRelayPlayer(player)
-	If other < 0 Or other >= relayPlayers.Length Or Not relayPlayers[other].active Then Return
-	relayInputPacketCount :+ 1
-	If relayDropEvery > 0 And relayInputPacketCount Mod UInt(relayDropEvery) = 0 Then Return
-	If relayDelayMillis <= 0 Then
-		ForwardRelayMessage(player, event)
-		Return
-	End If
-	If event.Payload().Length() > Size_T(RELAY_DELAY_PACKET_SIZE) Then Return
-	For Local slot:Int = 0 Until RELAY_DELAY_SLOTS
-		If relayDelayedValid[slot] Then Continue
-		relayDelayedValid[slot] = True
-		relayDelayedAt[slot] = MilliSecs() + relayDelayMillis
-		relayDelayedPeer[slot] = relayPlayers[other].peer
-		relayDelayedLength[slot] = event.Payload().Length()
-		MemCopy(Byte Ptr(relayDelayedStorage) + Size_T(slot * RELAY_DELAY_PACKET_SIZE), event.Payload().Data(), event.Payload().Length())
-		Return
-	Next
-End Function
-
-Function FlushDelayedInputs()
-	Local now:Int = MilliSecs()
-	For Local slot:Int = 0 Until RELAY_DELAY_SLOTS
-		If Not relayDelayedValid[slot] Or now < relayDelayedAt[slot] Then Continue
-		relaySession.Send(relayDelayedPeer[slot], ROLLBACK_MSG_INPUT, ROLLBACK_GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(relayDelayedStorage) + Size_T(slot * RELAY_DELAY_PACKET_SIZE), relayDelayedLength[slot])
-		relayDelayedValid[slot] = False
-	Next
+	ForwardRelayMessage(player, event)
 End Function
 
 Local port:Int = ROLLBACK_PORT
 If AppArgs.Length > 1 Then port = Int(AppArgs[1])
 If AppArgs.Length > 2 Then relayDelayMillis = Max(0, Int(AppArgs[2]))
-If AppArgs.Length > 3 Then relayDropEvery = Max(0, Int(AppArgs[3]))
-Local transport:TENetTransport = TENetTransport.Listen(port, ROLLBACK_PLAYER_COUNT, 2)
-If Not transport Then Throw "Could not listen on UDP port " + port
+If AppArgs.Length > 3 Then relayLossPercent = Min(100, Max(0, Int(AppArgs[3])))
+If AppArgs.Length > 4 Then relayJitterMillis = Max(0, Int(AppArgs[4]))
+If AppArgs.Length > 5 Then relaySeed = UInt(AppArgs[5])
+Local backend:TENetTransport = TENetTransport.Listen(port, ROLLBACK_PLAYER_COUNT, 2)
+If Not backend Then Throw "Could not listen on UDP port " + port
+Local impairmentConfig:SImpairmentConfig = New SImpairmentConfig(UInt(relayDelayMillis), UInt(relayJitterMillis), UInt(relayLossPercent * 100), 0, 0, 0, 0, IMPAIRMENT_DELIVERY_UNRELIABLE | IMPAIRMENT_DELIVERY_UNRELIABLE_SEQUENCED)
+Local transport:TImpairedTransport = TImpairedTransport.Create(backend, 512, 1200, impairmentConfig, relaySeed)
+If Not transport Then Throw "Could not create impaired relay transport"
 relaySession = TNetSession.CreateHost(transport, ROLLBACK_APP_ID, ROLLBACK_APP_VERSION, ROLLBACK_PLAYER_COUNT, 1200)
 If Not relaySession Then Throw "Could not create rollback relay session"
 If Not relaySession.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000)) Then Throw "Could not configure relay connection health"
 
 Print "Networked rollback relay listening on UDP port " + port
-Print "Input delay " + relayDelayMillis + " ms; drop every " + relayDropEvery + " packets (zero disables)"
+Print "Outbound unreliable traffic: " + relayDelayMillis + " ms latency, " + relayJitterMillis + " ms jitter, " + relayLossPercent + "% loss; seed " + relaySeed
 Print "Waiting for two players..."
 
 While relaySession.IsOpen()
@@ -171,7 +144,6 @@ While relaySession.IsOpen()
 				Print "Session error: " + event.Code()
 		End Select
 	Wend
-	FlushDelayedInputs()
 	Delay 1
 Wend
 

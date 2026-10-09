@@ -80,8 +80,51 @@ Type TPlainSimulation Implements IRollbackSimulation
 	End Method
 End Type
 
+Type TMultiSimulation Implements IRollbackSimulation
+	Field positions:Int[3]
+	Field corruptFrame:Int = -1
+
+	Method SaveState:Size_T(buffer:Byte Ptr, capacity:Size_T)
+		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
+		For Local player:Int = 0 Until positions.Length
+			writer.WriteUInt32(UInt(positions[player]))
+		Next
+		If writer.Failed() Then Return 0
+		Return writer.Position()
+	End Method
+
+	Method LoadState:Int(state:SPacketView)
+		Local reader:SPacketReader = New SPacketReader(state)
+		For Local player:Int = 0 Until positions.Length
+			Local value:UInt
+			If Not reader.ReadUInt32(value) Then Return False
+			positions[player] = Int(value)
+		Next
+		Return reader.Remaining() = 0
+	End Method
+
+	Method PredictInput:Size_T(player:Int, frame:UInt, previous:SPacketView, buffer:Byte Ptr, capacity:Size_T)
+		If capacity < 1 Then Return 0
+		buffer[0] = 0
+		If Not previous.IsEmpty() Then buffer[0] = previous.Data()[0]
+		Return 1
+	End Method
+
+	Method SimulateFrame:Int(frame:UInt, inputs:SRollbackInput[])
+		If inputs.Length <> positions.Length Then Return False
+		For Local player:Int = 0 Until positions.Length
+			If inputs[player].Payload().Length() <> 1 Then Return False
+			positions[player] :+ Int(Byte(inputs[player].Payload().Data()[0]))
+		Next
+		If corruptFrame >= 0 And frame = UInt(corruptFrame) Then positions[2] :+ 2000
+		Return True
+	End Method
+End Type
+
 Local invalid:SRollbackSessionConfig = New SRollbackSessionConfig(1, 0, 32, 8, 1)
 Check(TRollbackSession.Create(New TTestSimulation, invalid) = Null, "reject one-player session")
+Local tooManyPlayers:SRollbackSessionConfig = New SRollbackSessionConfig(ROLLBACK_SESSION_MAX_PLAYERS + 1, 0, 32, 8, 1)
+Check(TRollbackSession.Create(New TTestSimulation, tooManyPlayers) = Null, "reject session above supported player limit")
 
 Local plainSimulation:TPlainSimulation = New TPlainSimulation
 Local plainConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 32, 4, 1)
@@ -194,5 +237,85 @@ Check(lastEffectFrame0 = 150 And lastEffectFrame1 = 150, "confirmed effects cove
 Check(session0.DroppedConfirmedEffects() = 0 And session1.DroppedConfirmedEffects() = 0, "confirmed effect queue did not overflow")
 Check(Not session0.Failed() And Not session1.Failed(), "sessions remained healthy")
 Check(session0.FailureReason() = ERollbackSessionFailure.None And session1.FailureReason() = ERollbackSessionFailure.None, "recovered sessions have no fatal failure")
+
+' Exercise the same orchestration with three peers. Inputs travel all-to-all,
+' while hashes and recovery use player zero as a hub/authority.
+Local multiSimulations:TMultiSimulation[3]
+Local multiSessions:TRollbackSession[3]
+For Local player:Int = 0 Until multiSessions.Length
+	multiSimulations[player] = New TMultiSimulation
+	Local multiConfig:SRollbackSessionConfig = New SRollbackSessionConfig(3, player, 128, 12, 1, 2, 8, 10, 10, 16)
+	multiSessions[player] = TRollbackSession.Create(multiSimulations[player], multiConfig)
+	Check(multiSessions[player] <> Null And multiSessions[player].Start(Byte Ptr(neutral), 1), "start three-player rollback session")
+Next
+multiSimulations[2].corruptFrame = 45
+
+Local multiPacket:Byte[256]
+Local multiResponse:Byte[256]
+For Local frame:Int = 0 Until 120
+	For Local player:Int = 0 Until multiSessions.Length
+		Local input:Byte[1]
+		If ((frame / (7 + player)) + player) Mod 2 = 0 Then input[0] = 1 Else input[0] = Byte(-1)
+		Check(multiSessions[player].CanStep(), "three-player session can advance")
+		Check(multiSessions[player].Step(Byte Ptr(input), 1), "advance three-player session")
+	Next
+
+	If frame Mod 3 = 2 Then
+		For Local source:Int = 0 Until multiSessions.Length
+			Local length:Size_T = multiSessions[source].WriteInputs(Byte Ptr(multiPacket), Size_T(multiPacket.Length))
+			Check(length > 0, "write three-player input batch")
+			For Local receiver:Int = 0 Until multiSessions.Length
+				If receiver <> source Then Check(multiSessions[receiver].ReceiveInputs(source, New SPacketView(Byte Ptr(multiPacket), length)), "receive three-player input batch")
+			Next
+		Next
+	End If
+
+	' Player zero broadcasts its hash. Other players send theirs to player zero.
+	For Local source:Int = 0 Until multiSessions.Length
+		Local hashLength:Size_T = multiSessions[source].WriteReadyHash(Byte Ptr(multiPacket), Size_T(multiPacket.Length))
+		If hashLength > 0 Then
+			If source = 0 Then
+				For Local receiver:Int = 1 Until multiSessions.Length
+					Check(multiSessions[receiver].ReceiveHash(source, New SPacketView(Byte Ptr(multiPacket), hashLength)), "receive authority hash")
+				Next
+			Else
+				Check(multiSessions[0].ReceiveHash(source, New SPacketView(Byte Ptr(multiPacket), hashLength)), "authority receives player hash")
+			End If
+		End If
+	Next
+
+	For Local player:Int = 1 Until multiSessions.Length
+		If multiSessions[player].NeedsStateSync() Then
+			Local requestLength:Size_T = multiSessions[player].WriteStateSyncRequest(Byte Ptr(multiPacket), Size_T(multiPacket.Length))
+			Local responseLength:Size_T = multiSessions[0].WriteStateSyncResponse(New SPacketView(Byte Ptr(multiPacket), requestLength), Byte Ptr(multiResponse), Size_T(multiResponse.Length))
+			Check(requestLength > 0 And responseLength > 0, "exchange three-player state sync")
+			Check(multiSessions[player].ReceiveStateSync(New SPacketView(Byte Ptr(multiResponse), responseLength)), "apply three-player state sync")
+		End If
+	Next
+Next
+
+' Flush the final redundant input batch and resolve any last rollback.
+For Local source:Int = 0 Until multiSessions.Length
+	Local length:Size_T = multiSessions[source].WriteInputs(Byte Ptr(multiPacket), Size_T(multiPacket.Length))
+	For Local receiver:Int = 0 Until multiSessions.Length
+		If receiver <> source Then Check(multiSessions[receiver].ReceiveInputs(source, New SPacketView(Byte Ptr(multiPacket), length)), "receive final three-player inputs")
+	Next
+Next
+For Local player:Int = 0 Until multiSessions.Length
+	Check(multiSessions[player].Step(Byte Ptr(zero), 1), "resolve final three-player rollback")
+Next
+
+For Local player:Int = 1 Until multiSessions.Length
+	For Local position:Int = 0 Until 3
+		Check(multiSimulations[player].positions[position] = multiSimulations[0].positions[position], "three-player deterministic state converged: peer " + player + ", position " + position + ", expected " + multiSimulations[0].positions[position] + ", got " + multiSimulations[player].positions[position])
+	Next
+	Check(multiSessions[player].HasRemoteFrame(0), "per-player remote progress available")
+Next
+Check(multiSessions[0].HasRemoteFrame() And multiSessions[0].RemoteSimulationFrame() > 0, "aggregate remote progress available")
+Check(multiSessions[2].StateSyncCount() = 1 And multiSessions[2].HashMismatches() > 0, "divergent third player recovered")
+Check(multiSessions[1].StateSyncCount() = 0 And multiSessions[1].HashMismatches() = 0, "healthy third player did not resynchronise")
+For Local player:Int = 0 Until multiSessions.Length
+	Check(Not multiSessions[player].Failed(), "three-player session remained healthy")
+Next
 
 Print "GameNet.RollbackSession tests passed"

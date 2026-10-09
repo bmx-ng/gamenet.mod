@@ -234,7 +234,7 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 					Case ROLLBACK_MSG_INPUT
 						If game And game.IsRunning() Then game.ReceiveInputs(1 - localPlayer, event.Payload())
 					Case ROLLBACK_MSG_HASH
-						If game And game.IsRunning() Then game.ReceiveHash(event.Payload())
+						If game And game.IsRunning() Then game.ReceiveHash(1 - localPlayer, event.Payload())
 					Case ROLLBACK_MSG_STATE_SYNC_REQUEST
 						If game And game.IsRunning() And game.IsAuthority() Then game.SendStateSyncResponse(session, hostPeer, ROLLBACK_MSG_STATE_SYNC_RESPONSE, ROLLBACK_CONTROL_CHANNEL, event.Payload(), Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 					Case ROLLBACK_MSG_STATE_SYNC_RESPONSE

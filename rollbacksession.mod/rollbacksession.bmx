@@ -36,6 +36,9 @@ Import GameNet.Session
 Import GameNet.Rollback
 Import BRL.Blitz
 
+Const ROLLBACK_SESSION_MAX_PLAYERS:Int = 8
+Const ROLLBACK_STATE_SYNC_VERSION:UInt = 2
+
 Rem
 bbdoc: Receives presentation effects produced while simulating one frame.
 about: Effects are retained by the rollback session and become visible to the
@@ -139,6 +142,7 @@ End Enum
 
 Rem
 bbdoc: Configuration for a #TRollbackSession.
+about: Player counts from two through #ROLLBACK_SESSION_MAX_PLAYERS are supported.
 End Rem
 Struct SRollbackSessionConfig
 	Field playerCount:Int
@@ -176,7 +180,7 @@ End Struct
 
 Rem
 bbdoc: Orchestrates a peer's deterministic rollback timeline.
-about: The session owns bounded state, input, packet, and hash storage. Normal
+about: The session owns bounded state, input, packet, and per-player hash storage. Normal
 frame operations reuse that storage. It does not own or poll the network
 session; applications route input and hash messages to #ReceiveInputs and
 #ReceiveHash and may use the provided send helpers.
@@ -196,8 +200,8 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	Field _failureReason:ERollbackSessionFailure
 	Field _currentFrame:UInt
 	Field _totalFrames:Long
-	Field _hasRemoteFrame:Int
-	Field _remoteSimulationFrame:UInt
+	Field _remoteFrameValid:Byte[]
+	Field _remoteSimulationFrames:UInt[]
 	Field _rollbackCount:Int
 	Field _lastRollbackDepth:Int
 	Field _largestRollbackDepth:Int
@@ -243,9 +247,11 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		_inputBuffer = MemAlloc(config.maxInputSize)
 		_frameInputs = New SRollbackInput[config.playerCount]
 		_priorInputs = New SPacketView[config.playerCount]
-		_remoteHashValid = New Byte[config.hashQueueSize]
-		_remoteHashFrames = New UInt[config.hashQueueSize]
-		_remoteHashes = New UInt[config.hashQueueSize]
+		_remoteFrameValid = New Byte[config.playerCount]
+		_remoteSimulationFrames = New UInt[config.playerCount]
+		_remoteHashValid = New Byte[config.playerCount * config.hashQueueSize]
+		_remoteHashFrames = New UInt[config.playerCount * config.hashQueueSize]
+		_remoteHashes = New UInt[config.playerCount * config.hashQueueSize]
 		If _effectSimulation Then
 			_effectFrameTags = New UInt[config.historyFrames]
 			_effectFrameValid = New Byte[config.historyFrames]
@@ -292,6 +298,10 @@ Type TRollbackSession Implements IRollbackEffectWriter
 
 	Method ConfirmedEffectAddress:Byte Ptr(slot:Int)
 		Return _confirmedEffectStorage + Size_T(slot) * _config.maxEffectSize
+	End Method
+
+	Method RemoteHashSlot:Int(player:Int, queueSlot:Int)
+		Return player * _config.hashQueueSize + queueSlot
 	End Method
 
 	Method BeginEffectFrame(frame:UInt)
@@ -394,22 +404,26 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	Method CheckRemoteHashes()
 		If _rollback.NeedsRollback() Or Not _rollback.HasConfirmedFrame() Then Return
 		Local confirmedStateFrame:UInt = _rollback.ConfirmedFrame() + 1
-		For Local slot:Int = 0 Until _remoteHashValid.Length
-			If Not _remoteHashValid[slot] Then Continue
-			If RollbackFrameAfter(_remoteHashFrames[slot], confirmedStateFrame) Or RollbackFrameAfter(_remoteHashFrames[slot], _currentFrame) Then Continue
-			Local localHash:UInt
-			If _rollback.GetStateHash(_remoteHashFrames[slot], localHash) Then
-				_hashesChecked :+ 1
-				If localHash <> _remoteHashes[slot] Then
-					_hashMismatches :+ 1
-					If _config.localPlayer <> _config.authorityPlayer Then
-						_needsStateSync = True
-						_stateSyncRequestSent = False
-						_stateSyncMismatchFrame = _remoteHashFrames[slot]
+		For Local player:Int = 0 Until _config.playerCount
+			If player = _config.localPlayer Then Continue
+			For Local queueSlot:Int = 0 Until _config.hashQueueSize
+				Local slot:Int = RemoteHashSlot(player, queueSlot)
+				If Not _remoteHashValid[slot] Then Continue
+				If RollbackFrameAfter(_remoteHashFrames[slot], confirmedStateFrame) Or RollbackFrameAfter(_remoteHashFrames[slot], _currentFrame) Then Continue
+				Local localHash:UInt
+				If _rollback.GetStateHash(_remoteHashFrames[slot], localHash) Then
+					_hashesChecked :+ 1
+					If localHash <> _remoteHashes[slot] Then
+						_hashMismatches :+ 1
+						If _config.localPlayer <> _config.authorityPlayer Then
+							_needsStateSync = True
+							_stateSyncRequestSent = False
+							_stateSyncMismatchFrame = _remoteHashFrames[slot]
+						End If
 					End If
 				End If
-			End If
-			_remoteHashValid[slot] = False
+				_remoteHashValid[slot] = False
+			Next
 		Next
 	End Method
 
@@ -420,7 +434,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	End Method
 
 	Function ValidConfig:Int(simulation:IRollbackSimulation, config:SRollbackSessionConfig)
-		Return simulation <> Null And config.playerCount = 2 And config.localPlayer >= 0 And config.localPlayer < config.playerCount ..
+		Return simulation <> Null And config.playerCount >= 2 And config.playerCount <= ROLLBACK_SESSION_MAX_PLAYERS And config.localPlayer >= 0 And config.localPlayer < config.playerCount ..
 			And config.historyFrames >= 2 And config.maxStateSize > 0 And config.maxInputSize > 0 ..
 			And config.inputDelayFrames >= 0 And config.inputDelayFrames < config.historyFrames ..
 			And config.maxPredictionFrames >= 0 And config.maxPredictionFrames < config.historyFrames ..
@@ -496,8 +510,10 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		_currentFrame = 0
 		_totalFrames = 0
 		_running = True
-		_hasRemoteFrame = False
-		_remoteSimulationFrame = 0
+		For Local player:Int = 0 Until _config.playerCount
+			_remoteFrameValid[player] = False
+			_remoteSimulationFrames[player] = 0
+		Next
 		_rollbackCount = 0
 		_lastRollbackDepth = 0
 		_largestRollbackDepth = 0
@@ -656,8 +672,8 @@ Type TRollbackSession Implements IRollbackEffectWriter
 			End Select
 			If Not reader.Skip(Size_T(length)) Then Return False
 		Next
-		If Not _hasRemoteFrame Or RollbackFrameAfter(simulatedFrame, _remoteSimulationFrame) Then _remoteSimulationFrame = simulatedFrame
-		_hasRemoteFrame = True
+		If Not _remoteFrameValid[player] Or RollbackFrameAfter(simulatedFrame, _remoteSimulationFrames[player]) Then _remoteSimulationFrames[player] = simulatedFrame
+		_remoteFrameValid[player] = True
 		CommitConfirmedEffects()
 		Return True
 	End Method
@@ -675,7 +691,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	bbdoc: Writes the next confirmed state hash, or zero when none is ready.
 	End Rem
 	Method WriteReadyHash:Size_T(buffer:Byte Ptr, capacity:Size_T)
-		If Not _running Or Not buffer Or _config.hashInterval = 0 Or Not _rollback.HasConfirmedFrame() Then Return 0
+		If Not _running Or Not buffer Or _config.hashInterval = 0 Or _rollback.NeedsRollback() Or Not _rollback.HasConfirmedFrame() Then Return 0
 		Local confirmedStateFrame:UInt = _rollback.ConfirmedFrame() + 1
 		Local frame:UInt = (confirmedStateFrame / _config.hashInterval) * _config.hashInterval
 		If frame = 0 Or RollbackFrameAfter(frame, _currentFrame) Then Return 0
@@ -692,15 +708,15 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	End Method
 
 	Rem
-	bbdoc: Accepts a confirmed state hash produced by #WriteReadyHash.
+	bbdoc: Accepts player @player's confirmed state hash produced by #WriteReadyHash.
 	End Rem
-	Method ReceiveHash:Int(packet:SPacketView)
-		If Not _running Or _failed Then Return False
+	Method ReceiveHash:Int(player:Int, packet:SPacketView)
+		If Not _running Or _failed Or player < 0 Or player >= _config.playerCount Or player = _config.localPlayer Then Return False
 		Local reader:SPacketReader = New SPacketReader(packet)
 		Local frame:UInt
 		Local hash:UInt
 		If Not reader.ReadUInt32(frame) Or Not reader.ReadUInt32(hash) Or reader.Remaining() <> 0 Then Return False
-		Local slot:Int = Int(frame Mod UInt(_remoteHashValid.Length))
+		Local slot:Int = RemoteHashSlot(player, Int(frame Mod UInt(_config.hashQueueSize)))
 		_remoteHashValid[slot] = True
 		_remoteHashFrames[slot] = frame
 		_remoteHashes[slot] = hash
@@ -709,7 +725,18 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	End Method
 
 	Rem
-	bbdoc: Sends the next ready confirmed-state hash.
+	bbdoc: Accepts a confirmed hash from the other player in a two-player session.
+	about: Sessions with more than two players must use the player-indexed overload.
+	End Rem
+	Method ReceiveHash:Int(packet:SPacketView)
+		If _config.playerCount <> 2 Then Return False
+		Return ReceiveHash(1 - _config.localPlayer, packet)
+	End Method
+
+	Rem
+	bbdoc: Sends the next ready confirmed-state hash to one peer.
+	about: This is a two-player convenience. For more players, call
+	#WriteReadyHash once and broadcast the resulting packet.
 	End Rem
 	Method SendReadyHash:ETransportResult(session:TNetSession, peer:SNetPeer, messageType:UInt, channel:UInt, packetBuffer:Byte Ptr, packetCapacity:Size_T)
 		Local priorHasLast:Int = _hasLastHashSent
@@ -732,9 +759,12 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	End Rem
 	Method WriteStateSyncRequest:Size_T(buffer:Byte Ptr, capacity:Size_T)
 		If Not _running Or _failed Or Not _needsStateSync Or _config.localPlayer = _config.authorityPlayer Or Not buffer Then Return 0
+		Local confirmedStateFrame:UInt = _rollback.ConfirmedFrame() + 1
+		If RollbackFrameAfter(confirmedStateFrame, _currentFrame) Then confirmedStateFrame = _currentFrame
 		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
-		writer.WriteUInt8(1)
+		writer.WriteUInt8(ROLLBACK_STATE_SYNC_VERSION)
 		writer.WriteUInt32(_currentFrame)
+		writer.WriteUInt32(confirmedStateFrame)
 		writer.WriteUInt32(_stateSyncMismatchFrame)
 		If writer.Failed() Then Return 0
 		Return writer.Position()
@@ -763,17 +793,19 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Local reader:SPacketReader = New SPacketReader(request)
 		Local version:UInt
 		Local requesterFrame:UInt
+		Local requesterConfirmedStateFrame:UInt
 		Local mismatchFrame:UInt
-		If Not reader.ReadUInt8(version) Or version <> 1 Or Not reader.ReadUInt32(requesterFrame) Or Not reader.ReadUInt32(mismatchFrame) Or reader.Remaining() <> 0 Then Return 0
+		If Not reader.ReadUInt8(version) Or version <> ROLLBACK_STATE_SYNC_VERSION Or Not reader.ReadUInt32(requesterFrame) Or Not reader.ReadUInt32(requesterConfirmedStateFrame) Or RollbackFrameAfter(requesterConfirmedStateFrame, requesterFrame) Or Not reader.ReadUInt32(mismatchFrame) Or reader.Remaining() <> 0 Then Return 0
 
 		Local stateFrame:UInt = _rollback.ConfirmedFrame() + 1
 		If RollbackFrameAfter(stateFrame, requesterFrame) Then stateFrame = requesterFrame
+		If RollbackFrameAfter(stateFrame, requesterConfirmedStateFrame) Then stateFrame = requesterConfirmedStateFrame
 		Local state:SPacketView
 		Local hash:UInt
 		If Not _rollback.GetState(stateFrame, state) Or Not _rollback.GetStateHash(stateFrame, hash) Then Return 0
 
 		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
-		writer.WriteUInt8(1)
+		writer.WriteUInt8(ROLLBACK_STATE_SYNC_VERSION)
 		writer.WriteUInt32(stateFrame)
 		writer.WriteUInt32(mismatchFrame)
 		writer.WriteUInt32(UInt(state.Length()))
@@ -805,7 +837,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Local mismatchFrame:UInt
 		Local length:UInt
 		Local expectedHash:UInt
-		If Not reader.ReadUInt8(version) Or version <> 1 Or Not reader.ReadUInt32(stateFrame) Or Not reader.ReadUInt32(mismatchFrame) Or mismatchFrame <> _stateSyncMismatchFrame Or Not reader.ReadUInt32(length) Or Not reader.ReadUInt32(expectedHash) Then Return False
+		If Not reader.ReadUInt8(version) Or version <> ROLLBACK_STATE_SYNC_VERSION Or Not reader.ReadUInt32(stateFrame) Or Not reader.ReadUInt32(mismatchFrame) Or mismatchFrame <> _stateSyncMismatchFrame Or Not reader.ReadUInt32(length) Or Not reader.ReadUInt32(expectedHash) Then Return False
 		If length < 1 Or length > UInt(_config.maxStateSize) Or Size_T(length) <> reader.Remaining() Then Return False
 		Local state:SPacketView = reader.RemainingView()
 		If RollbackHash32(state.Data(), state.Length()) <> expectedHash Then Return False
@@ -877,12 +909,53 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Return _currentFrame
 	End Method
 
-	Method HasRemoteFrame:Int()
-		Return _hasRemoteFrame
+	Method HasRemoteFrame:Int(player:Int)
+		If player < 0 Or player >= _config.playerCount Or player = _config.localPlayer Then Return False
+		Return _remoteFrameValid[player]
 	End Method
 
+	Method RemoteSimulationFrame:UInt(player:Int)
+		If Not HasRemoteFrame(player) Then Return 0
+		Return _remoteSimulationFrames[player]
+	End Method
+
+	Rem
+	bbdoc: Returns whether every remote player has reported a simulation frame.
+	End Rem
+	Method HasRemoteFrame:Int()
+		For Local player:Int = 0 Until _config.playerCount
+			If player <> _config.localPlayer And Not _remoteFrameValid[player] Then Return False
+		Next
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns the slowest reported remote simulation frame.
+	End Rem
 	Method RemoteSimulationFrame:UInt()
-		Return _remoteSimulationFrame
+		If Not HasRemoteFrame() Then Return 0
+		Local found:Int
+		Local slowest:UInt
+		For Local player:Int = 0 Until _config.playerCount
+			If player = _config.localPlayer Then Continue
+			If Not found Or RollbackFrameAfter(slowest, _remoteSimulationFrames[player]) Then
+				slowest = _remoteSimulationFrames[player]
+				found = True
+			End If
+		Next
+		Return slowest
+	End Method
+
+	Method PlayerCount:Int()
+		Return _config.playerCount
+	End Method
+
+	Method LocalPlayer:Int()
+		Return _config.localPlayer
+	End Method
+
+	Method AuthorityPlayer:Int()
+		Return _config.authorityPlayer
 	End Method
 
 	Method HasConfirmedFrame:Int()

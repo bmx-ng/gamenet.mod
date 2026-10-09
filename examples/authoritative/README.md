@@ -4,16 +4,19 @@ This example deliberately separates game authority from presentation:
 
 - `server.bmx` is a headless ENet host. It owns the simulation and the players'
   positions, with room for four clients.
-- `client.bmx` sends sequenced input, predicts its own movement immediately,
-  reconciles it with the host, and uses `GameNet.Snapshot` to interpolate other
-  players from a bounded snapshot timeline.
+- `client.bmx` uses `GameNet.Prediction` to retain and replay sequenced input,
+  predicts its own movement immediately, reconciles it with the host, and uses
+  `GameNet.Snapshot` to interpolate other players from a bounded timeline.
 - `protocol.bmx` is shared wire-format code built from `GameNet.Core` packet
   readers and writers.
 
 Spawn and despawn messages use reliable ordered delivery on the control channel.
 Input and per-entity snapshots use unreliable sequenced delivery on the gameplay
-channel. This is a small example of choosing guarantees per message rather than
-making every packet reliable.
+channel. Each input packet repeats the client's bounded unacknowledged command
+window, so a later packet can repair an earlier loss. The host processes every
+command exactly once and acknowledges the last processed sequence in snapshots.
+This is a small example of choosing guarantees per message rather than making
+every packet reliable.
 
 Build and run the host first:
 
@@ -46,4 +49,6 @@ The example sends snapshots at 60 Hz. Local prediction keeps input responsive;
 small reconciliation errors are corrected over several frames rather than by
 snapping. Other players use an adaptive render delay: it expands when snapshot
 arrivals are late, then slowly recovers toward a two-tick baseline. The host's
-positions remain authoritative throughout.
+positions remain authoritative throughout. The host also buffers eight fixed-
+step input commands before consuming them, allowing ordinary arrival jitter to
+be absorbed without making remote movement bursty.

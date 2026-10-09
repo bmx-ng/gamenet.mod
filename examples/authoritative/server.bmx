@@ -5,10 +5,10 @@ Import BRL.Math
 Import BRL.System
 Import GameNet.Session
 Import GameNet.ENet
+Import GameNet.Prediction
 
 Include "protocol.bmx"
 
-Const SIMULATION_STEP:Float = 1.0 / 60.0
 Const SNAPSHOT_INTERVAL:Int = 16
 
 Struct SServerPlayer
@@ -16,15 +16,34 @@ Struct SServerPlayer
 	Field active:Int
 	Field x:Float
 	Field y:Float
-	Field inputX:Int
-	Field inputY:Int
-	Field lastInputSequence:UInt
+	Field receiveSequencer:SPredictionSequencer
+	Field inputQueue:TPredictionHistory
+	Field inputStarted:Int
+	Field lastProcessedInput:UInt
 End Struct
 
 Global session:TNetSession
 Global players:SServerPlayer[AUTHORITATIVE_MAX_PLAYERS]
 Global sendBuffer:Byte[32]
 Global serverTick:UInt
+Global inputSequences:UInt[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
+Global inputXs:Int[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
+Global inputYs:Int[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
+
+Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int)
+	Local moveX:Float = Float(inputX) / 127.0
+	Local moveY:Float = Float(inputY) / 127.0
+	Local magnitudeSquared:Float = moveX * moveX + moveY * moveY
+	If magnitudeSquared > 1.0 Then
+		Local inverseMagnitude:Float = 1.0 / Sqr(magnitudeSquared)
+		moveX :* inverseMagnitude
+		moveY :* inverseMagnitude
+	End If
+	x :+ moveX * AUTHORITATIVE_PLAYER_SPEED * AUTHORITATIVE_SIMULATION_STEP
+	y :+ moveY * AUTHORITATIVE_PLAYER_SPEED * AUTHORITATIVE_SIMULATION_STEP
+	x = Max(PLAYER_RADIUS, Min(WORLD_WIDTH - PLAYER_RADIUS, x))
+	y = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, y))
+End Function
 
 Function PlayerIndexForPeer:Int(peer:SNetPeer)
 	For Local index:Int = 0 Until players.Length
@@ -72,7 +91,7 @@ Function SendSnapshots()
 		If Not players[recipientIndex].active Then Continue
 		For Local playerIndex:Int = 0 Until players.Length
 			If Not players[playerIndex].active Then Continue
-			Local length:Size_T = EncodeSnapshot(Byte Ptr(sendBuffer), Size_T(sendBuffer.Length), UInt(playerIndex + 1), serverTick, players[playerIndex].lastInputSequence, players[playerIndex].x, players[playerIndex].y)
+			Local length:Size_T = EncodeSnapshot(Byte Ptr(sendBuffer), Size_T(sendBuffer.Length), UInt(playerIndex + 1), serverTick, players[playerIndex].lastProcessedInput, players[playerIndex].x, players[playerIndex].y)
 			session.Send(players[recipientIndex].peer, MSG_SNAPSHOT, GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(sendBuffer), length)
 		Next
 	Next
@@ -111,9 +130,10 @@ While session.IsOpen()
 					players[index].active = True
 					players[index].x = WORLD_WIDTH * (Float(index + 1) / Float(AUTHORITATIVE_MAX_PLAYERS + 1))
 					players[index].y = WORLD_HEIGHT * 0.5
-					players[index].inputX = 0
-					players[index].inputY = 0
-					players[index].lastInputSequence = 0
+					players[index].receiveSequencer.Reset(1)
+					players[index].inputQueue = TPredictionHistory.Create(AUTHORITATIVE_SERVER_INPUT_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE)
+					players[index].inputStarted = False
+					players[index].lastProcessedInput = 0
 					AnnounceJoinedPlayer(index)
 					Print "Player " + (index + 1) + " joined"
 				End If
@@ -121,13 +141,17 @@ While session.IsOpen()
 			Case ESessionEventKind.Message
 				Local index:Int = PlayerIndexForPeer(event.Peer())
 				If index >= 0 And players[index].active And event.MessageType() = MSG_INPUT Then
-					Local sequence:UInt
-					Local newInputX:Int
-					Local newInputY:Int
-					If event.Channel() = GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced And DecodeInput(event.Payload(), sequence, newInputX, newInputY) Then
-						players[index].lastInputSequence = sequence
-						players[index].inputX = Max(-127, Min(127, newInputX))
-						players[index].inputY = Max(-127, Min(127, newInputY))
+					Local inputCount:Int
+					If event.Channel() = GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced And DecodeInputBatch(event.Payload(), inputSequences, inputXs, inputYs, inputCount) Then
+						For Local inputIndex:Int = 0 Until inputCount
+							Select players[index].receiveSequencer.Process(inputSequences[inputIndex])
+								Case EPredictionSequenceResult.Accepted
+									Local payloadLength:Size_T = EncodeMovementInput(Byte Ptr(sendBuffer), Size_T(sendBuffer.Length), inputXs[inputIndex], inputYs[inputIndex])
+									If Not players[index].inputQueue.Add(inputSequences[inputIndex], Byte Ptr(sendBuffer), payloadLength) Then Exit
+								Case EPredictionSequenceResult.Gap
+									Exit
+							End Select
+						Next
 					End If
 				End If
 
@@ -148,24 +172,25 @@ While session.IsOpen()
 	Local elapsed:Int = Min(100, Max(0, now - previousTime))
 	previousTime = now
 	accumulator :+ Float(elapsed) / 1000.0
-
-	While accumulator >= SIMULATION_STEP
-		accumulator :- SIMULATION_STEP
+	While accumulator >= AUTHORITATIVE_SIMULATION_STEP
+		accumulator :- AUTHORITATIVE_SIMULATION_STEP
 		serverTick :+ 1
 		For Local index:Int = 0 Until players.Length
-			If Not players[index].active Then Continue
-			Local moveX:Float = Float(players[index].inputX) / 127.0
-			Local moveY:Float = Float(players[index].inputY) / 127.0
-			Local magnitudeSquared:Float = moveX * moveX + moveY * moveY
-			If magnitudeSquared > 1.0 Then
-				Local inverseMagnitude:Float = 1.0 / Sqr(magnitudeSquared)
-				moveX :* inverseMagnitude
-				moveY :* inverseMagnitude
+			If Not players[index].active Or Not players[index].inputQueue Then Continue
+			If Not players[index].inputStarted Then
+				If players[index].inputQueue.Count() < AUTHORITATIVE_SERVER_INPUT_DELAY Then Continue
+				players[index].inputStarted = True
 			End If
-			players[index].x :+ moveX * AUTHORITATIVE_PLAYER_SPEED * SIMULATION_STEP
-			players[index].y :+ moveY * AUTHORITATIVE_PLAYER_SPEED * SIMULATION_STEP
-			players[index].x = Max(PLAYER_RADIUS, Min(WORLD_WIDTH - PLAYER_RADIUS, players[index].x))
-			players[index].y = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, players[index].y))
+			Local input:SPredictionInput
+			If players[index].inputQueue.Get(0, input) Then
+				Local inputX:Int
+				Local inputY:Int
+				If DecodeMovementInput(input.Payload(), inputX, inputY) Then
+					ApplyInput(players[index].x, players[index].y, inputX, inputY)
+					players[index].lastProcessedInput = input.Sequence()
+					players[index].inputQueue.Acknowledge(input.Sequence())
+				End If
+			End If
 		Next
 	Wend
 

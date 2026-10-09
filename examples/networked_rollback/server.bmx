@@ -109,6 +109,7 @@ Local transport:TENetTransport = TENetTransport.Listen(port, ROLLBACK_PLAYER_COU
 If Not transport Then Throw "Could not listen on UDP port " + port
 relaySession = TNetSession.CreateHost(transport, ROLLBACK_APP_ID, ROLLBACK_APP_VERSION, ROLLBACK_PLAYER_COUNT, 1200)
 If Not relaySession Then Throw "Could not create rollback relay session"
+If Not relaySession.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000)) Then Throw "Could not configure relay connection health"
 
 Print "Networked rollback relay listening on UDP port " + port
 Print "Input delay " + relayDelayMillis + " ms; drop every " + relayDropEvery + " packets (zero disables)"
@@ -152,11 +153,6 @@ While relaySession.IsOpen()
 					Case ROLLBACK_MSG_STATE_SYNC_RESPONSE
 						If player = 0 And event.Channel() = ROLLBACK_CONTROL_CHANNEL And event.Delivery() = EDeliveryMode.ReliableOrdered And event.Payload().Length() >= 18 Then ForwardRelayMessage(player, event)
 
-					Case ROLLBACK_MSG_PING
-						Local token:UInt
-						If DecodePing(event.Payload(), token) Then
-							relaySession.Send(event.Peer(), ROLLBACK_MSG_PONG, ROLLBACK_CONTROL_CHANNEL, EDeliveryMode.UnreliableSequenced, event.Payload().Data(), event.Payload().Length())
-						End If
 				End Select
 
 			Case ESessionEventKind.Left

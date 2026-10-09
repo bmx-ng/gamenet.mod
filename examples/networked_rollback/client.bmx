@@ -167,6 +167,7 @@ Local pendingPeer:SNetPeer
 If transport.Connect(serverAddress, serverPort, pendingPeer) <> ETransportResult.Ok Then Throw "Could not connect to " + serverAddress
 Local session:TNetSession = TNetSession.CreateClient(transport, ROLLBACK_APP_ID, ROLLBACK_APP_VERSION, Null, 0, 1, 1200)
 If Not session Then Throw "Could not create the rollback client session"
+If Not session.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000)) Then Throw "Could not configure client connection health"
 
 ?android Or ios
 Graphics 960, 540, 32, 0, GRAPHICS_FULLSCREEN_DESKTOP
@@ -186,7 +187,7 @@ Local matchId:UInt
 Local status:String = "Connecting to " + serverAddress + ":" + serverPort
 Local accumulator:Double
 Local previousTime:Int = MilliSecs()
-Local lastInputSend:Int, lastPingSend:Int, roundTripMillis:Int
+Local lastInputSend:Int
 Local lastDiagnosticFrame:UInt
 Local confirmedEffects:Int
 Local lastConfirmedEffectFrame:UInt
@@ -243,20 +244,12 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 						Local player:Int
 						If DecodePlayerAssignment(event.Payload(), player) Then status = "Player " + (player + 1) + " left; waiting for opponent"
 						If game Then game.Stop()
-					Case ROLLBACK_MSG_PONG
-						Local token:UInt
-						If DecodePing(event.Payload(), token) Then roundTripMillis = Int(UInt(now) - token)
 				End Select
 			Case ESessionEventKind.Error
 				status = "Session error (code " + event.Code() + ")"
 		End Select
 	Wend
 
-	If hostPeer.IsValid() And now - lastPingSend >= 500 Then
-		Local n:Size_T = EncodePing(Byte Ptr(packetBuffer), Size_T(packetBuffer.Length), UInt(now))
-		session.Send(hostPeer, ROLLBACK_MSG_PING, ROLLBACK_CONTROL_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(packetBuffer), n)
-		lastPingSend = now
-	End If
 	If game And game.IsRunning() And game.NeedsStateSync() Then
 		game.SendStateSyncRequest(session, hostPeer, ROLLBACK_MSG_STATE_SYNC_REQUEST, ROLLBACK_CONTROL_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 	End If
@@ -334,7 +327,12 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 	SetColor 255, 255, 255
 	DrawText status, 12, 12
 	DrawText "Blue: you    Orange: remote player    input delay " + INPUT_DELAY_FRAMES, 12, 32
-	DrawText "Relay RTT " + roundTripMillis + " ms", 12, 52
+	Local peerHealth:SSessionPeerHealth
+	If hostPeer.IsValid() And session.GetPeerHealth(hostPeer, UInt(now), peerHealth) And peerHealth.HasRoundTrip() Then
+		DrawText "Relay RTT " + peerHealth.RoundTripMillis() + " ms    jitter " + peerHealth.JitterMillis() + " ms    lost probes " + peerHealth.ProbesLost(), 12, 52
+	Else
+		DrawText "Relay health awaiting first probe", 12, 52
+	End If
 	If game And game.IsRunning() Then
 		DrawText "Frame " + game.CurrentFrame() + "    peer " + game.RemoteSimulationFrame() + "    confirmed " + ConfirmedFrameText(game), 12, 72
 		DrawText "Rollbacks " + game.RollbackCount() + "    last " + game.LastRollbackDepth() + "    largest " + game.LargestRollbackDepth(), 12, 92

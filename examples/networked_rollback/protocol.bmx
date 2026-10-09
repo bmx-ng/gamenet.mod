@@ -1,5 +1,5 @@
 Const ROLLBACK_APP_ID:UInt = $52424b32 ' RBK2
-Const ROLLBACK_APP_VERSION:UInt = 4
+Const ROLLBACK_APP_VERSION:UInt = 5
 Const ROLLBACK_PORT:Int = 46341
 
 Const ROLLBACK_CONTROL_CHANNEL:UInt = 0
@@ -9,8 +9,6 @@ Const ROLLBACK_MSG_START:UInt = 1
 Const ROLLBACK_MSG_INPUT:UInt = 2
 Const ROLLBACK_MSG_HASH:UInt = 3
 Const ROLLBACK_MSG_STOP:UInt = 4
-Const ROLLBACK_MSG_PING:UInt = 5
-Const ROLLBACK_MSG_PONG:UInt = 6
 Const ROLLBACK_MSG_STATE_SYNC_REQUEST:UInt = 7
 Const ROLLBACK_MSG_STATE_SYNC_RESPONSE:UInt = 8
 
@@ -45,12 +43,4 @@ Function DecodeMatch:Int(packet:SPacketView, matchId:UInt Var)
 	Local reader:SPacketReader = New SPacketReader(packet)
 	If Not reader.ReadUInt32(matchId) Then Return False
 	Return reader.Remaining() = 0
-End Function
-
-Function EncodePing:Size_T(buffer:Byte Ptr, capacity:Size_T, token:UInt)
-	Return EncodeMatch(buffer, capacity, token)
-End Function
-
-Function DecodePing:Int(packet:SPacketView, token:UInt Var)
-	Return DecodeMatch(packet, token)
 End Function

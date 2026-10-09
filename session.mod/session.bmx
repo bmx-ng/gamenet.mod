@@ -72,6 +72,119 @@ End Enum
 Const SESSION_REJECT_APPLICATION_BASE:Int = 1024
 
 Rem
+bbdoc: Session-owned disconnect reasons produced by connection health policy.
+End Rem
+Enum ESessionDisconnectCode:Int
+	HandshakeTimeout = 1
+	IdleTimeout
+End Enum
+
+Rem
+bbdoc: Optional timeout and active connection probe policy.
+about: Zero disables the corresponding feature. Probe loss measures GameNet
+health probes, not arbitrary application packets.
+End Rem
+Struct SSessionHealthConfig
+	Field handshakeTimeoutMillis:UInt
+	Field idleTimeoutMillis:UInt
+	Field probeIntervalMillis:UInt
+	Field probeTimeoutMillis:UInt
+
+	Method New(handshakeTimeoutMillis:UInt = 0, idleTimeoutMillis:UInt = 0, probeIntervalMillis:UInt = 0, probeTimeoutMillis:UInt = 0)
+		Self.handshakeTimeoutMillis = handshakeTimeoutMillis
+		Self.idleTimeoutMillis = idleTimeoutMillis
+		Self.probeIntervalMillis = probeIntervalMillis
+		Self.probeTimeoutMillis = probeTimeoutMillis
+	End Method
+End Struct
+
+Rem
+bbdoc: An allocation-free snapshot of one session peer's connection health.
+End Rem
+Struct SSessionPeerHealth
+	Private
+	Field _active:Int
+	Field _idleMillis:UInt
+	Field _hasRoundTrip:Int
+	Field _roundTripMillis:UInt
+	Field _jitterMillis:UInt
+	Field _probesSent:UInt
+	Field _probesReceived:UInt
+	Field _probesLost:UInt
+	Field _framesSent:ULong
+	Field _framesReceived:ULong
+	Field _bytesSent:ULong
+	Field _bytesReceived:ULong
+
+	Method New(active:Int, idleMillis:UInt, hasRoundTrip:Int, roundTripMillis:UInt, jitterMillis:UInt, probesSent:UInt, probesReceived:UInt, probesLost:UInt, framesSent:ULong, framesReceived:ULong, bytesSent:ULong, bytesReceived:ULong)
+		_active = active
+		_idleMillis = idleMillis
+		_hasRoundTrip = hasRoundTrip
+		_roundTripMillis = roundTripMillis
+		_jitterMillis = jitterMillis
+		_probesSent = probesSent
+		_probesReceived = probesReceived
+		_probesLost = probesLost
+		_framesSent = framesSent
+		_framesReceived = framesReceived
+		_bytesSent = bytesSent
+		_bytesReceived = bytesReceived
+	End Method
+
+	Public
+	Method New()
+	End Method
+
+	Method IsActive:Int()
+		Return _active
+	End Method
+
+	Method IdleMillis:UInt()
+		Return _idleMillis
+	End Method
+
+	Method HasRoundTrip:Int()
+		Return _hasRoundTrip
+	End Method
+
+	Method RoundTripMillis:UInt()
+		Return _roundTripMillis
+	End Method
+
+	Method JitterMillis:UInt()
+		Return _jitterMillis
+	End Method
+
+	Method ProbesSent:UInt()
+		Return _probesSent
+	End Method
+
+	Method ProbesReceived:UInt()
+		Return _probesReceived
+	End Method
+
+	Method ProbesLost:UInt()
+		Return _probesLost
+	End Method
+
+	Method FramesSent:ULong()
+		Return _framesSent
+	End Method
+
+	Method FramesReceived:ULong()
+		Return _framesReceived
+	End Method
+
+	Method BytesSent:ULong()
+		Return _bytesSent
+	End Method
+
+	Method BytesReceived:ULong()
+		Return _bytesReceived
+	End Method
+End Struct
+
+Rem
 bbdoc: One session lifecycle, application message, or error event.
 about: Payload is a borrowed view which remains valid until the next call to
 #TNetSession.Poll on the same session.
@@ -172,6 +285,8 @@ Enum ESessionFrameKind:Byte
 	Accept
 	Reject
 	User
+	Probe
+	ProbeReply
 End Enum
 
 Enum ESessionPeerPhase:Byte
@@ -182,11 +297,28 @@ Enum ESessionPeerPhase:Byte
 	Active
 	Rejecting
 	Rejected
+	Disconnecting
 End Enum
 
 Struct SSessionPeerSlot
 	Field peer:SNetPeer
 	Field phase:ESessionPeerPhase
+	Field connectedAt:UInt
+	Field lastReceiveAt:UInt
+	Field lastProbeAt:UInt
+	Field probeToken:UInt
+	Field probeSentAt:UInt
+	Field probeOutstanding:Int
+	Field probesSent:UInt
+	Field probesReceived:UInt
+	Field probesLost:UInt
+	Field hasRoundTrip:Int
+	Field roundTripMillis:UInt
+	Field jitterMillis:UInt
+	Field framesSent:ULong
+	Field framesReceived:ULong
+	Field bytesSent:ULong
+	Field bytesReceived:ULong
 End Struct
 
 Public
@@ -212,6 +344,8 @@ Type TNetSession
 	Field _sendCapacity:Size_T
 	Field _helloData:Byte Ptr
 	Field _helloLength:Size_T
+	Field _healthConfig:SSessionHealthConfig
+	Field _nowMillis:UInt
 	Field _open:Int = True
 
 	Method New(transport:INetTransport, role:ESessionRole, applicationId:UInt, applicationVersion:UInt, maxPeers:Int, sendCapacity:Size_T, helloData:Byte Ptr, helloLength:Size_T)
@@ -245,6 +379,9 @@ Type TNetSession
 			If _peers[index].phase = ESessionPeerPhase.Empty Then
 				_peers[index].peer = peer
 				_peers[index].phase = phase
+				_peers[index].connectedAt = _nowMillis
+				_peers[index].lastReceiveAt = _nowMillis
+				_peers[index].lastProbeAt = _nowMillis
 				Return index
 			End If
 		Next
@@ -252,9 +389,17 @@ Type TNetSession
 	End Method
 
 	Method ClearPeer(index:Int)
-		_peers[index].peer = New SNetPeer
-		_peers[index].phase = ESessionPeerPhase.Empty
+		_peers[index] = New SSessionPeerSlot
 	End Method
+
+	Function ElapsedMillis:UInt(nowMillis:UInt, thenMillis:UInt)
+		Return nowMillis - thenMillis
+	End Function
+
+	Function AbsoluteDelta:UInt(first:UInt, second:UInt)
+		If first >= second Then Return first - second
+		Return second - first
+	End Function
 
 	Method QueueLocal:Int(event:SSessionEvent)
 		If _eventCount = _localEvents.Length Then Return False
@@ -284,7 +429,15 @@ Type TNetSession
 
 	Method SendWriter:ETransportResult(peer:SNetPeer, writer:SPacketWriter, channel:UInt = 0, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
 		If writer.Failed() Then Return ETransportResult.PacketTooLarge
-		Return _transport.Send(peer, channel, delivery, writer.View().Data(), writer.View().Length())
+		Local result:ETransportResult = _transport.Send(peer, channel, delivery, writer.View().Data(), writer.View().Length())
+		If result = ETransportResult.Ok Then
+			Local index:Int = PeerIndex(peer)
+			If index >= 0 Then
+				_peers[index].framesSent :+ 1
+				_peers[index].bytesSent :+ ULong(writer.View().Length())
+			End If
+		End If
+		Return result
 	End Method
 
 	Method SendHello:ETransportResult(peer:SNetPeer)
@@ -306,6 +459,60 @@ Type TNetSession
 		writer.WriteUInt32(UInt(code))
 		writer.WriteBytes(data, length)
 		Return SendWriter(peer, writer)
+	End Method
+
+	Method SendProbe:ETransportResult(index:Int)
+		Local writer:SPacketWriter = BeginFrame(ESessionFrameKind.Probe)
+		_peers[index].probeToken :+ 1
+		writer.WriteUInt32(_peers[index].probeToken)
+		Local result:ETransportResult = SendWriter(_peers[index].peer, writer, 0, EDeliveryMode.Unreliable)
+		If result = ETransportResult.Ok Then
+			_peers[index].lastProbeAt = _nowMillis
+			_peers[index].probeSentAt = _nowMillis
+			_peers[index].probeOutstanding = True
+			_peers[index].probesSent :+ 1
+		End If
+		Return result
+	End Method
+
+	Method SendProbeReply:ETransportResult(index:Int, token:UInt)
+		Local writer:SPacketWriter = BeginFrame(ESessionFrameKind.ProbeReply)
+		writer.WriteUInt32(token)
+		Return SendWriter(_peers[index].peer, writer, 0, EDeliveryMode.Unreliable)
+	End Method
+
+	Method MaintainHealth:Int()
+		For Local index:Int = 0 Until _peers.Length
+			Local phase:ESessionPeerPhase = _peers[index].phase
+			If phase = ESessionPeerPhase.Empty Or phase = ESessionPeerPhase.Rejecting Or phase = ESessionPeerPhase.Rejected Or phase = ESessionPeerPhase.Disconnecting Then Continue
+
+			If phase <> ESessionPeerPhase.Active Then
+				If _healthConfig.handshakeTimeoutMillis > 0 And ElapsedMillis(_nowMillis, _peers[index].connectedAt) >= _healthConfig.handshakeTimeoutMillis Then
+					If _transport.Disconnect(_peers[index].peer, Int(ESessionDisconnectCode.HandshakeTimeout)) = ETransportResult.Ok Then
+						_peers[index].phase = ESessionPeerPhase.Disconnecting
+						Return True
+					End If
+				End If
+				Continue
+			End If
+
+			If _healthConfig.idleTimeoutMillis > 0 And ElapsedMillis(_nowMillis, _peers[index].lastReceiveAt) >= _healthConfig.idleTimeoutMillis Then
+				If _transport.Disconnect(_peers[index].peer, Int(ESessionDisconnectCode.IdleTimeout)) = ETransportResult.Ok Then
+					_peers[index].phase = ESessionPeerPhase.Disconnecting
+					Return True
+				End If
+				Continue
+			End If
+
+			If _healthConfig.probeIntervalMillis > 0 Then
+				If _peers[index].probeOutstanding And ElapsedMillis(_nowMillis, _peers[index].probeSentAt) >= _healthConfig.probeTimeoutMillis Then
+					_peers[index].probeOutstanding = False
+					_peers[index].probesLost :+ 1
+				End If
+				If Not _peers[index].probeOutstanding And ElapsedMillis(_nowMillis, _peers[index].lastProbeAt) >= _healthConfig.probeIntervalMillis Then SendProbe(index)
+			End If
+		Next
+		Return False
 	End Method
 
 	Method RejectAndDisconnect(peer:SNetPeer, index:Int, code:Int)
@@ -383,6 +590,9 @@ Type TNetSession
 		Local peer:SNetPeer = raw.Peer()
 		Local index:Int = PeerIndex(peer)
 		If index < 0 Then Return ProtocolError(peer, index, event)
+		_peers[index].lastReceiveAt = _nowMillis
+		_peers[index].framesReceived :+ 1
+		_peers[index].bytesReceived :+ ULong(raw.Packet().Length())
 
 		Local reader:SPacketReader = New SPacketReader(raw.Packet())
 		Local magic:UInt
@@ -396,7 +606,9 @@ Type TNetSession
 		End If
 
 		Local frameKind:ESessionFrameKind = ESessionFrameKind(frameKindValue)
-		If frameKind <> ESessionFrameKind.User Then
+		If frameKind = ESessionFrameKind.Probe Or frameKind = ESessionFrameKind.ProbeReply Then
+			If raw.Channel() <> 0 Or raw.Delivery() <> EDeliveryMode.Unreliable Then Return ProtocolError(peer, index, event)
+		Else If frameKind <> ESessionFrameKind.User Then
 			If raw.Channel() <> 0 Or raw.Delivery() <> EDeliveryMode.ReliableOrdered Then
 				Return ProtocolError(peer, index, event)
 			End If
@@ -430,6 +642,33 @@ Type TNetSession
 				If Not reader.ReadUInt16(messageType) Then Return ProtocolError(peer, index, event)
 				event = SSessionEvent.Message(peer, raw.Channel(), raw.Delivery(), messageType, reader.RemainingView())
 				Return True
+
+			Case ESessionFrameKind.Probe
+				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event)
+				Local token:UInt
+				If Not reader.ReadUInt32(token) Or reader.Remaining() <> 0 Then Return ProtocolError(peer, index, event)
+				SendProbeReply(index, token)
+				Return False
+
+			Case ESessionFrameKind.ProbeReply
+				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event)
+				Local token:UInt
+				If Not reader.ReadUInt32(token) Or reader.Remaining() <> 0 Then Return ProtocolError(peer, index, event)
+				If _peers[index].probeOutstanding And token = _peers[index].probeToken Then
+					Local sample:UInt = ElapsedMillis(_nowMillis, _peers[index].probeSentAt)
+					If _peers[index].hasRoundTrip Then
+						Local delta:UInt = AbsoluteDelta(sample, _peers[index].roundTripMillis)
+						_peers[index].jitterMillis = (_peers[index].jitterMillis * 3 + delta) / 4
+						_peers[index].roundTripMillis = (_peers[index].roundTripMillis * 7 + sample) / 8
+					Else
+						_peers[index].roundTripMillis = sample
+						_peers[index].jitterMillis = 0
+						_peers[index].hasRoundTrip = True
+					End If
+					_peers[index].probeOutstanding = False
+					_peers[index].probesReceived :+ 1
+				End If
+				Return False
 		End Select
 
 		Return ProtocolError(peer, index, event)
@@ -478,6 +717,32 @@ Type TNetSession
 	End Rem
 	Method Role:ESessionRole()
 		Return _role
+	End Method
+
+	Rem
+	bbdoc: Configures connection health before any peer has been registered.
+	returns: False for an invalid policy or after connection processing begins.
+	End Rem
+	Method ConfigureHealth:Int(config:SSessionHealthConfig)
+		If (config.probeIntervalMillis = 0) <> (config.probeTimeoutMillis = 0) Then Return False
+		For Local index:Int = 0 Until _peers.Length
+			If _peers[index].phase <> ESessionPeerPhase.Empty Then Return False
+		Next
+		_healthConfig = config
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns a snapshot of connection health for @peer at @nowMillis.
+	End Rem
+	Method GetPeerHealth:Int(peer:SNetPeer, nowMillis:UInt, health:SSessionPeerHealth Var)
+		Local index:Int = PeerIndex(peer)
+		If index < 0 Then
+			health = New SSessionPeerHealth
+			Return False
+		End If
+		health = New SSessionPeerHealth(_peers[index].phase = ESessionPeerPhase.Active, ElapsedMillis(nowMillis, _peers[index].lastReceiveAt), _peers[index].hasRoundTrip, _peers[index].roundTripMillis, _peers[index].jitterMillis, _peers[index].probesSent, _peers[index].probesReceived, _peers[index].probesLost, _peers[index].framesSent, _peers[index].framesReceived, _peers[index].bytesSent, _peers[index].bytesReceived)
+		Return True
 	End Method
 
 	Rem
@@ -541,7 +806,8 @@ Type TNetSession
 	Rem
 	bbdoc: Writes the next session event and returns True, or returns False when idle.
 	End Rem
-	Method Poll:Int(event:SSessionEvent Var)
+	Method PollAt:Int(event:SSessionEvent Var, nowMillis:UInt)
+		_nowMillis = nowMillis
 		If PollLocal(event) Then Return True
 		If Not _open Then
 			event = New SSessionEvent
@@ -551,6 +817,7 @@ Type TNetSession
 		Repeat
 			Local raw:SNetEvent
 			If Not _transport.Poll(raw) Then
+				If MaintainHealth() Then Continue
 				event = New SSessionEvent
 				Return False
 			End If
@@ -566,6 +833,13 @@ Type TNetSession
 					Return True
 			End Select
 		Forever
+	End Method
+
+	Rem
+	bbdoc: Writes the next session event using the process monotonic clock.
+	End Rem
+	Method Poll:Int(event:SSessionEvent Var)
+		Return PollAt(event, UInt(MilliSecs()))
 	End Method
 
 	Method IsOpen:Int()

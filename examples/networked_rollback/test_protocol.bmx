@@ -19,8 +19,4 @@ length = EncodeMatch(Byte Ptr(buffer), Size_T(buffer.Length), $12345678:UInt)
 Local matchId:UInt
 Check(DecodeMatch(New SPacketView(Byte Ptr(buffer), length), matchId) And matchId = $12345678:UInt, "match identifier")
 
-length = EncodePing(Byte Ptr(buffer), Size_T(buffer.Length), 7654)
-Local token:UInt
-Check(DecodePing(New SPacketView(Byte Ptr(buffer), length), token) And token = 7654, "ping token")
-
 Print "Networked rollback protocol tests passed"

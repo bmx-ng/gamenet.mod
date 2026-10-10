@@ -1,0 +1,7 @@
+app.name=GameNet GameKit Session
+app.package=com.example.blitzmax.gamenet.gamekit
+app.version.name=1.0.0
+app.version.code=1
+app.orientation=landscape
+app.fullscreen=true
+ios.entitlements=gamekit_session.entitlements

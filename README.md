@@ -10,6 +10,8 @@ Transport-independent building blocks for real-time multiplayer games.
   local multiplayer, and protocol development.
 - `GameNet.ENet` provides UDP networking through ENet for direct and hosted
   connections.
+- `GameNet.GameKit` adapts Apple Game Center real-time matches to the common
+  transport contract on macOS and iOS.
 - `GameNet.Impairment` decorates any transport with deterministic, bounded
   latency, jitter, bandwidth, loss, duplication, and reordering simulation.
 - `GameNet.Session` adds a versioned handshake, framed application messages,
@@ -30,9 +32,8 @@ Transport-independent building blocks for real-time multiplayer games.
   opaque initial state, verification hashes, cursor playback, and portable
   serialization.
 
-Planned transport modules include `GameNet.GameKit`. Each backend imports
-`GameNet.Core`; the core module does not depend on a native networking library
-or platform service.
+Each backend imports `GameNet.Core`; the core module does not depend on a native
+networking library or platform service.
 
 This repository requires the current bcc2-based BlitzMax NG toolchain because
 its low-allocation API uses value Structs.
@@ -59,3 +60,7 @@ without requiring a network connection.
 deterministic Max2D clients through a non-authoritative ENet relay. It adds
 frame-numbered redundant input, bounded prediction lead, rollback over a real
 session, confirmed-state hashes, and repeatable delay and packet-loss testing.
+
+[`examples/gamekit_session`](examples/gamekit_session) programmatically
+automatches two Game Center players and validates a complete `GameNet.Session`
+handshake and message exchange over `GKMatch` on Apple devices.

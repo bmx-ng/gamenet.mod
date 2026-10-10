@@ -4,6 +4,7 @@ Framework Max2D.SDL3RenderMax2D
 Import Apple.GameKit
 Import GameNet.GameKit
 Import GameNet.Session
+Import GameNet.Match
 Import GameNet.RollbackSession
 Import Max2D.VirtualJoystick
 Import BRL.PolledInput
@@ -15,8 +16,8 @@ Const SIMULATION_HZ:Int = 60
 Const SIMULATION_STEP:Double = 1.0 / Double(SIMULATION_HZ)
 Const MAX_STEPS_PER_RENDER:Int = 8
 Const MAX_ACCUMULATED_TIME:Double = 0.25
-Const INPUT_DELAY_FRAMES:Int = 3
-Const MAX_PREDICTION_LEAD:Int = 12
+Const INPUT_DELAY_FRAMES:Int = 6
+Const MAX_PREDICTION_LEAD:Int = 18
 Const ROLLBACK_HISTORY:Int = 240
 Const HASH_INTERVAL:UInt = 30
 Const HASH_QUEUE_SIZE:Int = 32
@@ -25,13 +26,13 @@ Global gameCenter:TGameCenter = TGameCenter.Shared()
 Global pendingMatch:TGameCenterMatch
 Global transport:TGameKitTransport
 Global session:TNetSession
+Global matchLifecycle:TMatchLifecycle
 Global remotePeer:SNetPeer
 Global simulation:TReboundSimulation
 Global rollbackGame:TRollbackSession
 Global localPlayer:Int = -1
 Global sessionHost:Int
 Global joined:Int
-Global startSent:Int
 Global statusText:String = "Starting Game Center..."
 Global detailText:String = ""
 Global opponentName:String = ""
@@ -43,7 +44,9 @@ Global lastEffectText:String = ""
 Global effectFlash:Int
 Global searching:Int
 Global stalledRenders:Int
-Global catchUpRenders:Int
+Global multiStepRenders:Int
+Global maximumStepsPerRender:Int
+Global previousPower:Int
 
 Function ErrorText:String(error:TGameCenterError)
 	If Not error Then Return ""
@@ -60,6 +63,7 @@ Function ConfirmedFrameText:String(game:TRollbackSession)
 End Function
 
 Function StartRollbackGame(seed:UInt)
+	If rollbackGame Then rollbackGame.Stop()
 	simulation = New TReboundSimulation
 	simulation.Reset(seed)
 	Local config:SRollbackSessionConfig = New SRollbackSessionConfig(REBOUND_PLAYER_COUNT, localPlayer, ROLLBACK_HISTORY, REBOUND_STATE_SIZE, REBOUND_INPUT_SIZE, INPUT_DELAY_FRAMES, MAX_PREDICTION_LEAD, REBOUND_INPUT_BATCH_MAX, HASH_INTERVAL, HASH_QUEUE_SIZE, 4, 1, 64, 0)
@@ -74,20 +78,38 @@ Function StartRollbackGame(seed:UInt)
 	lastEffectText = ""
 	effectFlash = 0
 	stalledRenders = 0
-	catchUpRenders = 0
+	multiStepRenders = 0
+	maximumStepsPerRender = 0
 	statusText = "Rebound match running"
 	detailText = "You are player " + (localPlayer + 1) + " - " + opponentName + " is your opponent"
 End Function
 
-Function SendStart()
-	If Not sessionHost Or startSent Or Not joined Or Not session Then Return
-	Local seed:UInt = UInt(MilliSecs()) ~ $9e3779b9:UInt
-	Local length:Size_T = EncodeReboundStart(Byte Ptr(packetBuffer), Size_T(packetBuffer.Length), seed)
-	If session.Send(remotePeer, REBOUND_MSG_START, REBOUND_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(packetBuffer), length) = ETransportResult.Ok Then
-		startSent = True
-		StartRollbackGame(seed)
-	Else
-		statusText = "Could not send match start"
+Function ProcessMatchLifecycle(now:Int)
+	If Not matchLifecycle Then Return
+	matchLifecycle.UpdateAt(UInt(now))
+	Local event:SMatchEvent
+	While matchLifecycle.Poll(event)
+		Select event.Kind()
+			Case EMatchEventKind.CountdownStarted
+				statusText = "Both players ready"
+				detailText = "Round " + event.Round() + " begins shortly"
+			Case EMatchEventKind.Started
+				StartRollbackGame(event.Seed())
+			Case EMatchEventKind.Paused
+				statusText = "Match paused"
+			Case EMatchEventKind.Resumed
+				statusText = "Rebound match running"
+			Case EMatchEventKind.Finished
+				statusText = "Round complete"
+				detailText = "Press POWER when you are ready for a rematch"
+			Case EMatchEventKind.Aborted
+				statusText = "Match ended"
+				If rollbackGame Then rollbackGame.Stop()
+		End Select
+	Wend
+	If matchLifecycle.IsAuthority() And (matchLifecycle.Phase() = EMatchPhase.Waiting Or matchLifecycle.Phase() = EMatchPhase.Finished) And matchLifecycle.AllReady() Then
+		Local seed:UInt = UInt(now) ~ $9e3779b9:UInt ~ matchLifecycle.Round()
+		If matchLifecycle.BeginMatch(seed, 0, 750, UInt(now)) <> ETransportResult.Ok Then statusText = "Could not begin the match"
 	End If
 End Function
 
@@ -151,27 +173,37 @@ Function BeginNetworkSession()
 		session = TNetSession.CreateClient(transport, REBOUND_APP_ID, REBOUND_APP_VERSION, Null, 0, 1, 900)
 		statusText = "Connected; joining the match"
 	End If
-	If session Then session.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000))
+	If session Then
+		session.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000))
+		matchLifecycle = TMatchLifecycle.Create(session, New SMatchLifecycleConfig(REBOUND_PLAYER_COUNT, localPlayer, 0, REBOUND_MSG_MATCH_COMMAND, REBOUND_MSG_MATCH_STATE, REBOUND_CONTROL_CHANNEL, 32))
+		If Not matchLifecycle Then statusText = "Could not create match lifecycle"
+	End If
 	pendingMatch = Null
 End Function
 
-Function PollNetwork()
+Function PollNetwork(now:Int)
 	If Not session Then Return
 	Local event:SSessionEvent
-	While session.Poll(event)
+	While session.PollAt(event, UInt(now))
 		Select event.Kind()
 			Case ESessionEventKind.JoinRequested
 				If session.Accept(event.Peer()) <> ETransportResult.Ok Then statusText = "Could not accept opponent"
 			Case ESessionEventKind.Joined
 				remotePeer = event.Peer()
 				joined = True
-				statusText = "GameNet session joined"
-				SendStart()
+				statusText = "GameNet session joined; getting ready"
+				Local lifecycleResult:ETransportResult
+				If sessionHost Then
+					lifecycleResult = matchLifecycle.PlayerJoined(1, remotePeer, UInt(now))
+				Else If Not matchLifecycle.BindPlayer(0, remotePeer) Then
+					lifecycleResult = ETransportResult.InvalidPeer
+				End If
+				If lifecycleResult = ETransportResult.Ok Then lifecycleResult = matchLifecycle.SetLocalReady(True, UInt(now))
+				If lifecycleResult <> ETransportResult.Ok Then statusText = "Could not join the match lifecycle"
 			Case ESessionEventKind.Message
 				Select event.MessageType()
-					Case REBOUND_MSG_START
-						Local seed:UInt
-						If Not sessionHost And DecodeReboundStart(event.Payload(), seed) Then StartRollbackGame(seed)
+					Case REBOUND_MSG_MATCH_COMMAND, REBOUND_MSG_MATCH_STATE
+						If Not matchLifecycle.ReceiveAt(event.Peer(), event.MessageType(), event.Payload(), UInt(now)) Then statusText = "Invalid match lifecycle message"
 					Case REBOUND_MSG_INPUT
 						If rollbackGame And rollbackGame.IsRunning() Then rollbackGame.ReceiveInputs(1 - localPlayer, event.Payload())
 					Case REBOUND_MSG_HASH
@@ -182,6 +214,7 @@ Function PollNetwork()
 						If rollbackGame And rollbackGame.IsRunning() Then rollbackGame.ReceiveStateSync(event.Payload())
 				End Select
 			Case ESessionEventKind.Left
+				If matchLifecycle Then matchLifecycle.PlayerLeft(1 - localPlayer, event.Code(), UInt(now))
 				joined = False
 				statusText = "The other player left"
 				detailText = "Restart the example to find another match"
@@ -189,7 +222,7 @@ Function PollNetwork()
 			Case ESessionEventKind.Rejected
 				statusText = "Session rejected (" + event.Code() + ")"
 			Case ESessionEventKind.Error
-				statusText = "Session error (" + event.Code() + ")"
+				statusText = "Session error (" + event.Code() + ", detail " + Int(session.LastProtocolError()) + ")"
 		End Select
 	Wend
 	If rollbackGame And rollbackGame.IsRunning() And rollbackGame.NeedsStateSync() Then
@@ -214,6 +247,9 @@ Function ProcessConfirmedEffects()
 				lastEffectText = "Player " + (player + 1) + " broke a shield"
 			Case REBOUND_EFFECT_WIN
 				lastEffectText = "Player " + (player + 1) + " destroyed the core"
+				If matchLifecycle And matchLifecycle.IsAuthority() And matchLifecycle.Phase() = EMatchPhase.Running Then
+					matchLifecycle.Finish(player, 0, UInt(MilliSecs()))
+				End If
 		End Select
 	Wend
 End Function
@@ -289,11 +325,11 @@ Function DrawGame()
 		If simulation.Winner() = localPlayer Then result = "YOU WIN"
 		DrawText result, 350, 177
 		SetColor 245, 248, 255
-		DrawText "Hold POWER to ready for a rematch", 270, 220
+		DrawText "Press POWER to ready for a rematch", 270, 220
 		Local readyText:String = "You: waiting    Opponent: waiting"
-		If simulation.Ready(localPlayer) Then readyText = "You: READY    Opponent: waiting"
-		If simulation.Ready(1 - localPlayer) Then readyText = "You: waiting    Opponent: READY"
-		If simulation.Ready(0) And simulation.Ready(1) Then readyText = "Both players ready"
+		If matchLifecycle And matchLifecycle.PlayerReady(localPlayer) Then readyText = "You: READY    Opponent: waiting"
+		If matchLifecycle And matchLifecycle.PlayerReady(1 - localPlayer) Then readyText = "You: waiting    Opponent: READY"
+		If matchLifecycle And matchLifecycle.AllReady() Then readyText = "Both players ready"
 		DrawText readyText, 288, 252
 	End If
 End Function
@@ -337,15 +373,20 @@ While Not AppTerminate() And Not KeyDown(KEY_ESCAPE)
 	Local elapsed:Int = Min(250, Max(0, now - previousTime))
 	previousTime = now
 	BeginNetworkSession()
-	PollNetwork()
-	SendStart()
+	PollNetwork(now)
+	ProcessMatchLifecycle(now)
 
 	Local movement:Int
 	If controls.ButtonDown(0) Or KeyDown(KEY_W) Or KeyDown(KEY_UP) Then movement :- 127
 	If controls.ButtonDown(1) Or KeyDown(KEY_S) Or KeyDown(KEY_DOWN) Then movement :+ 127
 	Local power:Int = controls.ButtonDown(2) Or KeyDown(KEY_SPACE)
+	Local powerPressed:Int = power And Not previousPower
+	previousPower = power
+	If powerPressed And matchLifecycle And matchLifecycle.Phase() = EMatchPhase.Finished And Not matchLifecycle.PlayerReady(localPlayer) Then
+		If matchLifecycle.SetLocalReady(True, UInt(now)) <> ETransportResult.Ok Then statusText = "Could not ready for rematch"
+	End If
 
-	If rollbackGame And rollbackGame.IsRunning() Then
+	If rollbackGame And rollbackGame.IsRunning() And matchLifecycle And matchLifecycle.Phase() = EMatchPhase.Running Then
 		accumulator = Min(MAX_ACCUMULATED_TIME, accumulator + Double(elapsed) / 1000.0)
 		Local steps:Int
 		While accumulator >= SIMULATION_STEP And steps < MAX_STEPS_PER_RENDER
@@ -361,7 +402,8 @@ While Not AppTerminate() And Not KeyDown(KEY_ESCAPE)
 			rollbackGame.SendReadyHash(session, remotePeer, REBOUND_MSG_HASH, REBOUND_CONTROL_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 			lastInputSend = now
 		Wend
-		If steps > 1 Then catchUpRenders :+ 1
+		If steps > 1 Then multiStepRenders :+ 1
+		maximumStepsPerRender = Max(maximumStepsPerRender, steps)
 		If now - lastInputSend >= 50 Then
 			rollbackGame.SendInputs(session, remotePeer, REBOUND_MSG_INPUT, REBOUND_GAMEPLAY_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
 			lastInputSend = now
@@ -406,7 +448,7 @@ While Not AppTerminate() And Not KeyDown(KEY_ESCAPE)
 		If remotePeer.IsValid() And session.GetPeerHealth(remotePeer, UInt(now), health) And health.HasRoundTrip() Then
 			Local stepInfo:SRollbackStepInfo = rollbackGame.StepInfo()
 			healthText = "RTT " + health.RoundTripMillis() + " ms  jitter " + health.JitterMillis() + "  lead " + stepInfo.PredictionLead() + "  stalls " + stalledRenders
-			DrawText "rollback " + rollbackGame.RollbackCount() + "  depth " + rollbackGame.LastRollbackDepth() + "/" + rollbackGame.LargestRollbackDepth() + "  catch-up " + catchUpRenders + "  confirmed " + ConfirmedFrameText(rollbackGame), 185, REBOUND_WORLD_HEIGHT - 16
+			DrawText "rollback " + rollbackGame.RollbackCount() + "  depth " + rollbackGame.LastRollbackDepth() + "/" + rollbackGame.LargestRollbackDepth() + "  multi-step " + multiStepRenders + " max " + maximumStepsPerRender + "  confirmed " + ConfirmedFrameText(rollbackGame), 185, REBOUND_WORLD_HEIGHT - 16
 		End If
 		DrawText healthText, 225, REBOUND_WORLD_HEIGHT - 32
 		controls.Render()

@@ -17,9 +17,7 @@ Check(length = REBOUND_INPUT_SIZE, "input size")
 Check(DecodeReboundInput(New SPacketView(Byte Ptr(packet), length), movement, power), "decode input")
 Check(movement = -83 And power, "input values")
 
-length = EncodeReboundStart(Byte Ptr(packet), Size_T(packet.Length), $12345678:UInt)
-Local seed:UInt
-Check(DecodeReboundStart(New SPacketView(Byte Ptr(packet), length), seed) And seed = $12345678:UInt, "start seed")
+Local seed:UInt = $12345678:UInt
 
 Local first:TReboundSimulation = New TReboundSimulation
 Local second:TReboundSimulation = New TReboundSimulation

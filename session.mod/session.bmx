@@ -69,6 +69,31 @@ Enum ESessionRejectCode:Int
 	ProtocolViolation
 End Enum
 
+Rem
+bbdoc: Identifies the local validation which most recently rejected a session frame.
+about: This diagnostic is not sent on the wire and does not replace the stable
+#ESessionRejectCode returned by session events.
+End Rem
+Enum ESessionProtocolError:Int
+	None
+	UnknownPeer
+	MalformedHeader
+	HeaderMismatch
+	DeliveryMismatch
+	UnexpectedHello
+	MalformedHello
+	UnexpectedAccept
+	UnexpectedReject
+	MalformedReject
+	UserBeforeActive
+	MalformedUser
+	ProbeBeforeActive
+	MalformedProbe
+	ProbeReplyBeforeActive
+	MalformedProbeReply
+	UnknownFrameKind
+End Enum
+
 Const SESSION_REJECT_APPLICATION_BASE:Int = 1024
 
 Rem
@@ -347,6 +372,7 @@ Type TNetSession
 	Field _healthConfig:SSessionHealthConfig
 	Field _nowMillis:UInt
 	Field _open:Int = True
+	Field _lastProtocolError:ESessionProtocolError
 
 	Method New(transport:INetTransport, role:ESessionRole, applicationId:UInt, applicationVersion:UInt, maxPeers:Int, sendCapacity:Size_T, helloData:Byte Ptr, helloLength:Size_T)
 		_transport = transport
@@ -521,7 +547,8 @@ Type TNetSession
 		_transport.Disconnect(peer, code)
 	End Method
 
-	Method ProtocolError:Int(peer:SNetPeer, index:Int, event:SSessionEvent Var, code:Int = Int(ESessionRejectCode.ProtocolViolation))
+	Method ProtocolError:Int(peer:SNetPeer, index:Int, event:SSessionEvent Var, code:Int = Int(ESessionRejectCode.ProtocolViolation), detail:ESessionProtocolError = ESessionProtocolError.UnknownFrameKind)
+		_lastProtocolError = detail
 		If index >= 0 Then
 			If _role = ESessionRole.Host Then
 				RejectAndDisconnect(peer, index, code)
@@ -564,13 +591,13 @@ Type TNetSession
 
 	Method HandleHello:Int(peer:SNetPeer, index:Int, reader:SPacketReader, event:SSessionEvent Var)
 		If _role <> ESessionRole.Host Or _peers[index].phase <> ESessionPeerPhase.AwaitingHello Then
-			Return ProtocolError(peer, index, event)
+			Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.UnexpectedHello)
 		End If
 
 		Local applicationId:UInt
 		Local applicationVersion:UInt
 		If Not reader.ReadUInt32(applicationId) Or Not reader.ReadUInt32(applicationVersion) Then
-			Return ProtocolError(peer, index, event, Int(ESessionRejectCode.MalformedHandshake))
+			Return ProtocolError(peer, index, event, Int(ESessionRejectCode.MalformedHandshake), ESessionProtocolError.MalformedHello)
 		End If
 		If applicationId <> _applicationId Then
 			RejectAndDisconnect(peer, index, Int(ESessionRejectCode.ApplicationMismatch))
@@ -589,7 +616,7 @@ Type TNetSession
 	Method HandleData:Int(raw:SNetEvent, event:SSessionEvent Var)
 		Local peer:SNetPeer = raw.Peer()
 		Local index:Int = PeerIndex(peer)
-		If index < 0 Then Return ProtocolError(peer, index, event)
+		If index < 0 Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.UnknownPeer)
 		_peers[index].lastReceiveAt = _nowMillis
 		_peers[index].framesReceived :+ 1
 		_peers[index].bytesReceived :+ ULong(raw.Packet().Length())
@@ -599,18 +626,18 @@ Type TNetSession
 		Local wireVersion:UInt
 		Local frameKindValue:UInt
 		If Not reader.ReadUInt32(magic) Or Not reader.ReadUInt8(wireVersion) Or Not reader.ReadUInt8(frameKindValue) Then
-			Return ProtocolError(peer, index, event)
+			Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.MalformedHeader)
 		End If
 		If magic <> SESSION_MAGIC Or wireVersion <> SESSION_WIRE_VERSION Then
-			Return ProtocolError(peer, index, event)
+			Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.HeaderMismatch)
 		End If
 
 		Local frameKind:ESessionFrameKind = ESessionFrameKind(frameKindValue)
 		If frameKind = ESessionFrameKind.Probe Or frameKind = ESessionFrameKind.ProbeReply Then
-			If raw.Channel() <> 0 Or raw.Delivery() <> EDeliveryMode.Unreliable Then Return ProtocolError(peer, index, event)
+			If raw.Channel() <> 0 Or raw.Delivery() <> EDeliveryMode.Unreliable Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.DeliveryMismatch)
 		Else If frameKind <> ESessionFrameKind.User Then
 			If raw.Channel() <> 0 Or raw.Delivery() <> EDeliveryMode.ReliableOrdered Then
-				Return ProtocolError(peer, index, event)
+				Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.DeliveryMismatch)
 			End If
 		End If
 
@@ -620,7 +647,7 @@ Type TNetSession
 
 			Case ESessionFrameKind.Accept
 				If _role <> ESessionRole.Client Or _peers[index].phase <> ESessionPeerPhase.AwaitingAcceptance Then
-					Return ProtocolError(peer, index, event)
+					Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.UnexpectedAccept)
 				End If
 				_peers[index].phase = ESessionPeerPhase.Active
 				event = SSessionEvent.Joined(peer, reader.RemainingView())
@@ -628,32 +655,32 @@ Type TNetSession
 
 			Case ESessionFrameKind.Reject
 				If _role <> ESessionRole.Client Or _peers[index].phase <> ESessionPeerPhase.AwaitingAcceptance Then
-					Return ProtocolError(peer, index, event)
+					Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.UnexpectedReject)
 				End If
 				Local code:UInt
-				If Not reader.ReadUInt32(code) Then Return ProtocolError(peer, index, event)
+				If Not reader.ReadUInt32(code) Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.MalformedReject)
 				_peers[index].phase = ESessionPeerPhase.Rejected
 				event = SSessionEvent.Rejected(peer, Int(code), reader.RemainingView())
 				Return True
 
 			Case ESessionFrameKind.User
-				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event)
+				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.UserBeforeActive)
 				Local messageType:UInt
-				If Not reader.ReadUInt16(messageType) Then Return ProtocolError(peer, index, event)
+				If Not reader.ReadUInt16(messageType) Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.MalformedUser)
 				event = SSessionEvent.Message(peer, raw.Channel(), raw.Delivery(), messageType, reader.RemainingView())
 				Return True
 
 			Case ESessionFrameKind.Probe
-				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event)
+				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.ProbeBeforeActive)
 				Local token:UInt
-				If Not reader.ReadUInt32(token) Or reader.Remaining() <> 0 Then Return ProtocolError(peer, index, event)
+				If Not reader.ReadUInt32(token) Or reader.Remaining() <> 0 Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.MalformedProbe)
 				SendProbeReply(index, token)
 				Return False
 
 			Case ESessionFrameKind.ProbeReply
-				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event)
+				If _peers[index].phase <> ESessionPeerPhase.Active Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.ProbeReplyBeforeActive)
 				Local token:UInt
-				If Not reader.ReadUInt32(token) Or reader.Remaining() <> 0 Then Return ProtocolError(peer, index, event)
+				If Not reader.ReadUInt32(token) Or reader.Remaining() <> 0 Then Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.MalformedProbeReply)
 				If _peers[index].probeOutstanding And token = _peers[index].probeToken Then
 					Local sample:UInt = ElapsedMillis(_nowMillis, _peers[index].probeSentAt)
 					If _peers[index].hasRoundTrip Then
@@ -671,7 +698,7 @@ Type TNetSession
 				Return False
 		End Select
 
-		Return ProtocolError(peer, index, event)
+		Return ProtocolError(peer, index, event, Int(ESessionRejectCode.ProtocolViolation), ESessionProtocolError.UnknownFrameKind)
 	End Method
 
 	Method HandleDisconnected:Int(peer:SNetPeer, code:Int, event:SSessionEvent Var)
@@ -844,6 +871,13 @@ Type TNetSession
 
 	Method IsOpen:Int()
 		Return _open And _transport And _transport.IsOpen()
+	End Method
+
+	Rem
+	bbdoc: Returns the most recent local session-frame validation failure.
+	End Rem
+	Method LastProtocolError:ESessionProtocolError()
+		Return _lastProtocolError
 	End Method
 
 	Method Close()

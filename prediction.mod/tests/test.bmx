@@ -18,6 +18,7 @@ Check(PredictionSequenceAfter(1, $ffffffff:UInt), "wrapped sequence ordering")
 Check(Not PredictionSequenceAfter(9, 9), "equal sequence ordering")
 
 Check(TPredictionHistory.Create(0, 1) = Null, "reject zero history capacity")
+Check(TPredictionHistory.Create(2, Size_T(-1)) = Null, "reject prediction storage overflow")
 Local history:TPredictionHistory = TPredictionHistory.Create(3, 2)
 Check(history <> Null And history.Capacity() = 3, "create history")
 Local payloads:Byte[5]

@@ -188,6 +188,31 @@ Type TAuthoritativeClientSession
 	End Method
 
 	Public
+	Rem
+	bbdoc: Calculates client payload storage for @config without allocating it.
+	returns: False for an invalid configuration or Size_T arithmetic overflow.
+	End Rem
+	Function MemoryRequirements:Int(config:SAuthoritativeSessionConfig, requirements:SNetMemoryRequirements Var)
+		requirements = New SNetMemoryRequirements
+		If Not ValidConfig(config) Then Return False
+		Local nativeBytes:Size_T
+		Local managedBytes:Size_T
+		Local inputCount:Size_T = Size_T(config.inputHistoryCapacity)
+		Local entityCount:Size_T = Size_T(config.entityCount)
+		Local snapshotCount:Size_T = Size_T(config.snapshotCapacity)
+		If Not NetAccumulateSize(nativeBytes, inputCount, config.maxInputSize) Then Return False
+		If Not NetAccumulateSize(nativeBytes, entityCount * snapshotCount, config.maxStateSize) Then Return False
+		If Not NetAccumulateSize(nativeBytes, 1, AUTHORITATIVE_INPUT_HEADER_SIZE) Then Return False
+		If Not NetAccumulateSize(nativeBytes, Size_T(config.redundantInputCount), AUTHORITATIVE_INPUT_ENTRY_SIZE + config.maxInputSize) Then Return False
+		If Not NetAccumulateSize(managedBytes, inputCount, Size_T(SizeOf(UInt Null) + SizeOf(Size_T Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, entityCount, Size_T(SizeOf(Byte Ptr Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, entityCount * snapshotCount, Size_T(SizeOf(UInt Null) + SizeOf(Long Null) + SizeOf(Size_T Null))) Then Return False
+		Local totalBytes:Size_T = nativeBytes
+		If Not NetAccumulateSize(totalBytes, 1, managedBytes) Then Return False
+		requirements = New SNetMemoryRequirements(nativeBytes, managedBytes)
+		Return True
+	End Function
+
 	Function ValidConfig:Int(config:SAuthoritativeSessionConfig)
 		Return config.playerCount >= 1 And config.playerCount <= AUTHORITATIVE_SESSION_MAX_PLAYERS ..
 			And config.entityCount >= 1 And config.entityCount <= AUTHORITATIVE_SESSION_MAX_ENTITIES ..
@@ -209,7 +234,8 @@ Type TAuthoritativeClientSession
 
 	Public
 	Function Create:TAuthoritativeClientSession(config:SAuthoritativeSessionConfig)
-		If Not ValidConfig(config) Then Return Null
+		Local requirements:SNetMemoryRequirements
+		If Not MemoryRequirements(config, requirements) Then Return Null
 		Return New TAuthoritativeClientSession(config)
 	End Function
 
@@ -490,8 +516,30 @@ Type TAuthoritativeServerSession
 	End Method
 
 	Public
+	Rem
+	bbdoc: Calculates server payload storage for @config without allocating it.
+	returns: False for an invalid configuration or Size_T arithmetic overflow.
+	End Rem
+	Function MemoryRequirements:Int(config:SAuthoritativeSessionConfig, requirements:SNetMemoryRequirements Var)
+		requirements = New SNetMemoryRequirements
+		If Not TAuthoritativeClientSession.ValidConfig(config) Then Return False
+		Local nativeBytes:Size_T
+		Local managedBytes:Size_T
+		Local players:Size_T = Size_T(config.playerCount)
+		Local queuedInputs:Size_T = Size_T(config.serverInputCapacity)
+		If Not NetAccumulateSize(nativeBytes, players * queuedInputs, config.maxInputSize) Then Return False
+		If Not NetAccumulateSize(nativeBytes, 1, AUTHORITATIVE_SNAPSHOT_HEADER_SIZE + config.maxStateSize) Then Return False
+		If Not NetAccumulateSize(managedBytes, players, Size_T(SizeOf(SNetPeer) + SizeOf(Byte Null) + SizeOf(SPredictionSequencer) + SizeOf(Byte Ptr Null) + SizeOf(UInt Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, players * queuedInputs, Size_T(SizeOf(UInt Null) + SizeOf(Size_T Null))) Then Return False
+		Local totalBytes:Size_T = nativeBytes
+		If Not NetAccumulateSize(totalBytes, 1, managedBytes) Then Return False
+		requirements = New SNetMemoryRequirements(nativeBytes, managedBytes)
+		Return True
+	End Function
+
 	Function Create:TAuthoritativeServerSession(config:SAuthoritativeSessionConfig)
-		If Not TAuthoritativeClientSession.ValidConfig(config) Then Return Null
+		Local requirements:SNetMemoryRequirements
+		If Not MemoryRequirements(config, requirements) Then Return Null
 		Return New TAuthoritativeServerSession(config)
 	End Function
 

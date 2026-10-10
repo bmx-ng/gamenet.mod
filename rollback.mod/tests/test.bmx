@@ -10,6 +10,7 @@ End Function
 Check(RollbackFrameDelta(1, $ffffffff:UInt) = 2, "wrapped frame delta")
 Check(RollbackFrameAfter(1, $ffffffff:UInt), "wrapped frame ordering")
 Check(TRollbackBuffer.Create(0, 8, 4, 1) = Null, "reject zero players")
+Check(TRollbackBuffer.Create(2, 8, Size_T(-1), 1) = Null, "reject rollback storage overflow")
 
 Local rollback:TRollbackBuffer = TRollbackBuffer.Create(2, 4, 4, 1)
 Check(rollback <> Null And rollback.Capacity() = 4 And rollback.MaxPlayers() = 2, "create rollback buffer")
@@ -23,6 +24,9 @@ Local stateView:SPacketView
 Check(rollback.GetState(10, stateView) And stateView.Length() = 4 And stateView.Data()[2] = 3, "restore frame state")
 Local expectedHash:UInt = RollbackHash32(Byte Ptr(state), Size_T(state.Length))
 Check(rollback.StateHash(10) = expectedHash And expectedHash <> 0, "state hash")
+Local expectedHash64:ULong = RollbackHash64(Byte Ptr(state), Size_T(state.Length))
+Local storedHash64:ULong
+Check(rollback.GetStateHash64(10, storedHash64) And storedHash64 = expectedHash64 And expectedHash64 <> 0, "64-bit state hash")
 
 Local left:Byte[1]
 Local right:Byte[1]
@@ -69,5 +73,18 @@ Check(rollback.PrepareFrame($fffffffe:UInt), "prepare frame near wrap")
 Check(rollback.PrepareFrame($ffffffff:UInt), "prepare maximum frame")
 Check(rollback.PrepareFrame(0), "prepare wrapped frame")
 Check(rollback.LatestFrame() = 0, "latest frame wraps")
+
+' Exercise a complete bounded window repeatedly across UInt wraparound.
+Local soak:TRollbackBuffer = TRollbackBuffer.Create(2, 64, 4, 1)
+Local soakStart:UInt = $ffff0000:UInt
+For Local offset:Int = 0 Until 131072
+	Local frame:UInt = soakStart + UInt(offset)
+	state[0] = Byte(offset & $ff)
+	Check(soak.SaveState(frame, Byte Ptr(state), Size_T(state.Length)), "soak save state")
+	Check(soak.ConfirmInput(0, frame, Byte Ptr(right), 1) = ERollbackConfirmResult.Stored, "soak local input")
+	Check(soak.ConfirmInput(1, frame, Byte Ptr(left), 1) = ERollbackConfirmResult.Stored, "soak remote input")
+Next
+Check(soak.LatestFrame() = soakStart + UInt(131071), "soak crossed frame wrap")
+Check(soak.HasConfirmedFrame() And soak.ConfirmedFrame() = soak.LatestFrame(), "soak confirmation remained contiguous")
 
 Print "GameNet.Rollback tests passed"

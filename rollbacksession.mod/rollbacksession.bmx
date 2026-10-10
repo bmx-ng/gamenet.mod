@@ -242,6 +242,7 @@ End Struct
 Rem
 bbdoc: Configuration for a #TRollbackSession.
 about: Player counts from two through #ROLLBACK_SESSION_MAX_PLAYERS are supported.
+All peers must agree on @useHash64 because it changes hash and state-sync packet sizes.
 End Rem
 Struct SRollbackSessionConfig
 	Field playerCount:Int
@@ -258,8 +259,9 @@ Struct SRollbackSessionConfig
 	Field maxEffectSize:Size_T
 	Field confirmedEffectCapacity:Int
 	Field authorityPlayer:Int
+	Field useHash64:Int
 
-	Method New(playerCount:Int, localPlayer:Int, historyFrames:Int, maxStateSize:Size_T, maxInputSize:Size_T, inputDelayFrames:Int = 3, maxPredictionFrames:Int = 8, redundantInputFrames:Int = 12, hashInterval:UInt = 30, hashQueueSize:Int = 32, maxEffectsPerFrame:Int = 8, maxEffectSize:Size_T = 64, confirmedEffectCapacity:Int = 64, authorityPlayer:Int = 0)
+	Method New(playerCount:Int, localPlayer:Int, historyFrames:Int, maxStateSize:Size_T, maxInputSize:Size_T, inputDelayFrames:Int = 3, maxPredictionFrames:Int = 8, redundantInputFrames:Int = 12, hashInterval:UInt = 30, hashQueueSize:Int = 32, maxEffectsPerFrame:Int = 8, maxEffectSize:Size_T = 64, confirmedEffectCapacity:Int = 64, authorityPlayer:Int = 0, useHash64:Int = False)
 		Self.playerCount = playerCount
 		Self.localPlayer = localPlayer
 		Self.historyFrames = historyFrames
@@ -274,6 +276,7 @@ Struct SRollbackSessionConfig
 		Self.maxEffectSize = maxEffectSize
 		Self.confirmedEffectCapacity = confirmedEffectCapacity
 		Self.authorityPlayer = authorityPlayer
+		Self.useHash64 = useHash64
 	End Method
 End Struct
 
@@ -318,7 +321,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	Field _lastHashSent:UInt
 	Field _remoteHashValid:Byte[]
 	Field _remoteHashFrames:UInt[]
-	Field _remoteHashes:UInt[]
+	Field _remoteHashes:ULong[]
 	Field _effectFrameTags:UInt[]
 	Field _effectFrameValid:Byte[]
 	Field _effectFrameCounts:Int[]
@@ -350,7 +353,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		_remoteSimulationFrames = New UInt[config.playerCount]
 		_remoteHashValid = New Byte[config.playerCount * config.hashQueueSize]
 		_remoteHashFrames = New UInt[config.playerCount * config.hashQueueSize]
-		_remoteHashes = New UInt[config.playerCount * config.hashQueueSize]
+		_remoteHashes = New ULong[config.playerCount * config.hashQueueSize]
 		If _effectSimulation Then
 			_effectFrameTags = New UInt[config.historyFrames]
 			_effectFrameValid = New Byte[config.historyFrames]
@@ -509,8 +512,16 @@ Type TRollbackSession Implements IRollbackEffectWriter
 				Local slot:Int = RemoteHashSlot(player, queueSlot)
 				If Not _remoteHashValid[slot] Then Continue
 				If RollbackFrameAfter(_remoteHashFrames[slot], confirmedStateFrame) Or RollbackFrameAfter(_remoteHashFrames[slot], _currentFrame) Then Continue
-				Local localHash:UInt
-				If _rollback.GetStateHash(_remoteHashFrames[slot], localHash) Then
+				Local localHash:ULong
+				Local hasHash:Int
+				If _config.useHash64 Then
+					hasHash = _rollback.GetStateHash64(_remoteHashFrames[slot], localHash)
+				Else
+					Local hash32:UInt
+					hasHash = _rollback.GetStateHash(_remoteHashFrames[slot], hash32)
+					localHash = ULong(hash32)
+				End If
+				If hasHash Then
 					_hashesChecked :+ 1
 					If localHash <> _remoteHashes[slot] Then
 						_hashMismatches :+ 1
@@ -568,21 +579,65 @@ Type TRollbackSession Implements IRollbackEffectWriter
 
 	Function ValidConfig:Int(simulation:IRollbackSimulation, config:SRollbackSessionConfig)
 		Return simulation <> Null And config.playerCount >= 2 And config.playerCount <= ROLLBACK_SESSION_MAX_PLAYERS And config.localPlayer >= 0 And config.localPlayer < config.playerCount ..
-			And config.historyFrames >= 2 And config.maxStateSize > 0 And config.maxInputSize > 0 ..
+			And config.historyFrames >= 2 And config.maxStateSize > 0 And config.maxStateSize <= $ffffffff:Size_T ..
+			And config.maxInputSize > 0 And config.maxInputSize <= 65535 ..
+			And config.historyFrames <= $7fffffff / config.playerCount ..
 			And config.inputDelayFrames >= 0 And config.inputDelayFrames < config.historyFrames ..
 			And config.maxPredictionFrames >= 0 And config.maxPredictionFrames < config.historyFrames ..
 			And config.redundantInputFrames >= 1 And config.redundantInputFrames <= 255 ..
-			And config.hashQueueSize >= 1 And config.maxEffectsPerFrame >= 1 ..
+			And config.hashQueueSize >= 1 And config.hashQueueSize <= $7fffffff / config.playerCount ..
+			And config.maxEffectsPerFrame >= 1 And config.maxEffectsPerFrame <= $7fffffff / config.historyFrames ..
 			And config.maxEffectSize >= 1 And config.confirmedEffectCapacity >= 1 ..
 			And config.authorityPlayer >= 0 And config.authorityPlayer < config.playerCount
 	End Function
 
 	Public
 	Rem
+	bbdoc: Calculates the bounded payload storage reserved by @config without allocating it.
+	returns: False for an invalid configuration or a Size_T arithmetic overflow.
+	about: Managed runtime object and array headers are not included. Effect
+	storage is included only when @simulation implements IRollbackEffectSimulation.
+	End Rem
+	Function MemoryRequirements:Int(simulation:IRollbackSimulation, config:SRollbackSessionConfig, requirements:SNetMemoryRequirements Var)
+		requirements = New SNetMemoryRequirements
+		If Not ValidConfig(simulation, config) Then Return False
+		Local nativeBytes:Size_T
+		Local managedBytes:Size_T
+		Local players:Size_T = Size_T(config.playerCount)
+		Local history:Size_T = Size_T(config.historyFrames)
+		Local hashes:Size_T = Size_T(config.hashQueueSize)
+		Local effects:Size_T = Size_T(config.maxEffectsPerFrame)
+		Local confirmed:Size_T = Size_T(config.confirmedEffectCapacity)
+
+		If Not NetAccumulateSize(nativeBytes, history, config.maxStateSize) Then Return False
+		If Not NetAccumulateSize(nativeBytes, players * history, config.maxInputSize) Then Return False
+		If Not NetAccumulateSize(nativeBytes, 1, config.maxStateSize) Then Return False
+		If Not NetAccumulateSize(nativeBytes, 1, config.maxInputSize) Then Return False
+
+		If Not NetAccumulateSize(managedBytes, history, Size_T(SizeOf(UInt Null) + SizeOf(Byte Null) + SizeOf(Size_T Null) + SizeOf(UInt Null) + SizeOf(ULong Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, players * history, Size_T(SizeOf(Size_T Null) + SizeOf(Byte Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, players, Size_T(SizeOf(SRollbackInput) + SizeOf(SPacketView) + SizeOf(Byte Null) + SizeOf(UInt Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, players * hashes, Size_T(SizeOf(Byte Null) + SizeOf(UInt Null) + SizeOf(ULong Null))) Then Return False
+
+		If IRollbackEffectSimulation(simulation) Then
+			If Not NetAccumulateSize(nativeBytes, history * effects, config.maxEffectSize) Then Return False
+			If Not NetAccumulateSize(nativeBytes, confirmed, config.maxEffectSize) Then Return False
+			If Not NetAccumulateSize(managedBytes, history, Size_T(SizeOf(UInt Null) + SizeOf(Byte Null) + SizeOf(Int Null))) Then Return False
+			If Not NetAccumulateSize(managedBytes, history * effects, Size_T(SizeOf(UInt Null) + SizeOf(Size_T Null))) Then Return False
+			If Not NetAccumulateSize(managedBytes, confirmed, Size_T(SizeOf(UInt Null) + SizeOf(UInt Null) + SizeOf(Size_T Null))) Then Return False
+		End If
+		Local totalBytes:Size_T = nativeBytes
+		If Not NetAccumulateSize(totalBytes, 1, managedBytes) Then Return False
+		requirements = New SNetMemoryRequirements(nativeBytes, managedBytes)
+		Return True
+	End Function
+
+	Rem
 	bbdoc: Creates a bounded rollback session, or Null for invalid configuration.
 	End Rem
 	Function Create:TRollbackSession(simulation:IRollbackSimulation, config:SRollbackSessionConfig)
-		If Not ValidConfig(simulation, config) Then Return Null
+		Local requirements:SNetMemoryRequirements
+		If Not MemoryRequirements(simulation, config, requirements) Then Return Null
 		Return New TRollbackSession(simulation, config)
 	End Function
 
@@ -827,13 +882,19 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		If Not _running Or Not buffer Or _config.hashInterval = 0 Or _rollback.NeedsRollback() Or Not _rollback.HasConfirmedFrame() Then Return 0
 		Local confirmedStateFrame:UInt = _rollback.ConfirmedFrame() + 1
 		Local frame:UInt = (confirmedStateFrame / _config.hashInterval) * _config.hashInterval
-		If frame = 0 Or RollbackFrameAfter(frame, _currentFrame) Then Return 0
+		If (frame = 0 And _totalFrames < Long(_config.hashInterval)) Or RollbackFrameAfter(frame, _currentFrame) Then Return 0
 		If _hasLastHashSent And Not RollbackFrameAfter(frame, _lastHashSent) Then Return 0
-		Local hash:UInt
-		If Not _rollback.GetStateHash(frame, hash) Then Return 0
 		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
 		writer.WriteUInt32(frame)
-		writer.WriteUInt32(hash)
+		If _config.useHash64 Then
+			Local hash64:ULong
+			If Not _rollback.GetStateHash64(frame, hash64) Then Return 0
+			writer.WriteUInt64(hash64)
+		Else
+			Local hash32:UInt
+			If Not _rollback.GetStateHash(frame, hash32) Then Return 0
+			writer.WriteUInt32(hash32)
+		End If
 		If writer.Failed() Then Return 0
 		_hasLastHashSent = True
 		_lastHashSent = frame
@@ -847,8 +908,16 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		If Not _running Or _failed Or player < 0 Or player >= _config.playerCount Or player = _config.localPlayer Then Return False
 		Local reader:SPacketReader = New SPacketReader(packet)
 		Local frame:UInt
-		Local hash:UInt
-		If Not reader.ReadUInt32(frame) Or Not reader.ReadUInt32(hash) Or reader.Remaining() <> 0 Then Return False
+		Local hash:ULong
+		If Not reader.ReadUInt32(frame) Then Return False
+		If _config.useHash64 Then
+			If Not reader.ReadUInt64(hash) Then Return False
+		Else
+			Local hash32:UInt
+			If Not reader.ReadUInt32(hash32) Then Return False
+			hash = ULong(hash32)
+		End If
+		If reader.Remaining() <> 0 Then Return False
 		Local slot:Int = RemoteHashSlot(player, Int(frame Mod UInt(_config.hashQueueSize)))
 		_remoteHashValid[slot] = True
 		_remoteHashFrames[slot] = frame
@@ -950,15 +1019,22 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		If RollbackFrameAfter(stateFrame, requesterFrame) Then stateFrame = requesterFrame
 		If RollbackFrameAfter(stateFrame, requesterConfirmedStateFrame) Then stateFrame = requesterConfirmedStateFrame
 		Local state:SPacketView
-		Local hash:UInt
-		If Not _rollback.GetState(stateFrame, state) Or Not _rollback.GetStateHash(stateFrame, hash) Then Return 0
+		If Not _rollback.GetState(stateFrame, state) Then Return 0
 
 		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
 		writer.WriteUInt8(ROLLBACK_STATE_SYNC_VERSION)
 		writer.WriteUInt32(stateFrame)
 		writer.WriteUInt32(mismatchFrame)
 		writer.WriteUInt32(UInt(state.Length()))
-		writer.WriteUInt32(hash)
+		If _config.useHash64 Then
+			Local hash64:ULong
+			If Not _rollback.GetStateHash64(stateFrame, hash64) Then Return 0
+			writer.WriteUInt64(hash64)
+		Else
+			Local hash32:UInt
+			If Not _rollback.GetStateHash(stateFrame, hash32) Then Return 0
+			writer.WriteUInt32(hash32)
+		End If
 		writer.WriteBytes(state.Data(), state.Length())
 		If writer.Failed() Then Return 0
 		Return writer.Position()
@@ -985,11 +1061,18 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Local stateFrame:UInt
 		Local mismatchFrame:UInt
 		Local length:UInt
-		Local expectedHash:UInt
-		If Not reader.ReadUInt8(version) Or version <> ROLLBACK_STATE_SYNC_VERSION Or Not reader.ReadUInt32(stateFrame) Or Not reader.ReadUInt32(mismatchFrame) Or mismatchFrame <> _stateSyncMismatchFrame Or Not reader.ReadUInt32(length) Or Not reader.ReadUInt32(expectedHash) Then Return False
+		Local expectedHash:ULong
+		If Not reader.ReadUInt8(version) Or version <> ROLLBACK_STATE_SYNC_VERSION Or Not reader.ReadUInt32(stateFrame) Or Not reader.ReadUInt32(mismatchFrame) Or mismatchFrame <> _stateSyncMismatchFrame Or Not reader.ReadUInt32(length) Then Return False
+		If _config.useHash64 Then
+			If Not reader.ReadUInt64(expectedHash) Then Return False
+		Else
+			Local expectedHash32:UInt
+			If Not reader.ReadUInt32(expectedHash32) Then Return False
+			expectedHash = ULong(expectedHash32)
+		End If
 		If length < 1 Or length > UInt(_config.maxStateSize) Or Size_T(length) <> reader.Remaining() Then Return False
 		Local state:SPacketView = reader.RemainingView()
-		If RollbackHash32(state.Data(), state.Length()) <> expectedHash Then Return False
+		If (_config.useHash64 And RollbackHash64(state.Data(), state.Length()) <> expectedHash) Or (Not _config.useHash64 And ULong(RollbackHash32(state.Data(), state.Length())) <> expectedHash) Then Return False
 		Local depth:Int = RollbackFrameDelta(_currentFrame, stateFrame)
 		If depth < 0 Or depth >= _rollback.Capacity() Then Return False
 
@@ -1051,6 +1134,7 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	End Method
 
 	Method StateSyncPacketCapacity:Size_T()
+		If _config.useHash64 Then Return _config.maxStateSize + 21
 		Return _config.maxStateSize + 17
 	End Method
 

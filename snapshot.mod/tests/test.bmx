@@ -22,6 +22,7 @@ Check(SnapshotTickAfter(1, $ffffffff:UInt), "wrapped tick ordering")
 Check(Not SnapshotTickAfter(9, 9), "equal tick ordering")
 
 Check(TSnapshotTimeline.Create(0, 1) = Null, "reject zero timeline capacity")
+Check(TSnapshotTimeline.Create(2, Size_T(-1)) = Null, "reject snapshot storage overflow")
 Local timeline:TSnapshotTimeline = TSnapshotTimeline.Create(3, 2)
 Check(timeline <> Null, "create timeline")
 Local sample:SSnapshotSample

@@ -123,6 +123,8 @@ Type TPredictionHistory
 	End Rem
 	Function Create:TPredictionHistory(capacity:Int, maxPayloadSize:Size_T)
 		If capacity < 1 Or maxPayloadSize < 1 Then Return Null
+		Local storageBytes:Size_T
+		If Not NetAccumulateSize(storageBytes, Size_T(capacity), maxPayloadSize) Then Return Null
 		Return New TPredictionHistory(capacity, maxPayloadSize)
 	End Function
 

@@ -43,6 +43,12 @@ End Type
 Local config:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(2, 2, 8, 8, 4, 2, 4, 4, 60.0, 2.0, 12.0, 10, 11, 1)
 Check(TAuthoritativeClientSession.Create(New SAuthoritativeSessionConfig) = Null, "reject invalid client configuration")
 Check(TAuthoritativeServerSession.Create(New SAuthoritativeSessionConfig) = Null, "reject invalid server configuration")
+Local clientMemory:SNetMemoryRequirements
+Local serverMemory:SNetMemoryRequirements
+Check(TAuthoritativeClientSession.MemoryRequirements(config, clientMemory), "inspect authoritative client storage")
+Check(TAuthoritativeServerSession.MemoryRequirements(config, serverMemory), "inspect authoritative server storage")
+Check(clientMemory.NativeBytes() = 82 And clientMemory.ManagedArrayBytes() > 0, "report authoritative client storage")
+Check(serverMemory.NativeBytes() = 49 And serverMemory.ManagedArrayBytes() > 0, "report authoritative server storage")
 Local maximumConfig:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(AUTHORITATIVE_SESSION_MAX_PLAYERS, AUTHORITATIVE_SESSION_MAX_PLAYERS, 8, 8, 4, 2, 4)
 Check(TAuthoritativeClientSession.Create(maximumConfig) <> Null And TAuthoritativeServerSession.Create(maximumConfig) <> Null, "support sixteen-player authoritative sessions")
 Local excessiveConfig:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(AUTHORITATIVE_SESSION_MAX_PLAYERS + 1, 1, 8, 8, 4, 2, 4)
@@ -69,6 +75,12 @@ Check(client.QueueInput(Byte Ptr(inputB), 1) = 2, "queue second predicted input"
 Local packet:Byte[128]
 Local length:Size_T = client.WriteInputs(Byte Ptr(packet), Size_T(packet.Length))
 Check(length > 0, "write redundant input batch")
+Local fuzzServer:TAuthoritativeServerSession = TAuthoritativeServerSession.Create(config)
+Check(fuzzServer.BindPlayer(0, peer), "bind malformed-packet authority")
+For Local truncated:Int = 0 Until Int(length)
+	Check(Not fuzzServer.ReceiveInputs(0, peer, New SPacketView(Byte Ptr(packet), Size_T(truncated))), "reject truncated authoritative input")
+Next
+Check(fuzzServer.InputCount(0) = 0 And fuzzServer.ReceiveInputs(0, peer, New SPacketView(Byte Ptr(packet), length)), "complete authoritative input survives truncation fuzz")
 Check(server.ReceiveInputs(0, peer, New SPacketView(Byte Ptr(packet), length)), "receive input batch")
 Check(server.InputCount(0) = 2, "queue sequenced server inputs")
 
@@ -82,6 +94,13 @@ state[0] = 10
 length = server.WriteSnapshot(0, 0, 50, Byte Ptr(state), 1, Byte Ptr(packet), Size_T(packet.Length))
 Check(length > 0, "write local authoritative snapshot")
 Local snapshot:SAuthoritativeSnapshot
+Local fuzzClient:TAuthoritativeClientSession = TAuthoritativeClientSession.Create(config)
+Check(fuzzClient.SetLocalEntity(1), "configure malformed-packet snapshot client")
+Check(fuzzClient.QueueInput(Byte Ptr(inputA), 1) = 1, "align malformed-packet snapshot acknowledgement")
+For Local truncated:Int = 0 Until Int(length)
+	Check(Not fuzzClient.ReceiveSnapshot(New SPacketView(Byte Ptr(packet), Size_T(truncated)), 1000, snapshot), "reject truncated authoritative snapshot")
+Next
+Check(fuzzClient.ReceiveSnapshot(New SPacketView(Byte Ptr(packet), length), 1000, snapshot), "complete authoritative snapshot survives truncation fuzz")
 Check(client.ReceiveSnapshot(New SPacketView(Byte Ptr(packet), length), 1000, snapshot), "receive local authoritative snapshot")
 Check(snapshot.Entity() = 0 And snapshot.Tick() = 50 And snapshot.AcknowledgedInput() = 1 And StateValue(snapshot.State()) = 10, "decode snapshot metadata")
 Check(client.PendingInputCount() = 1 And client.AcknowledgedInput() = 1, "discard acknowledged prediction input")

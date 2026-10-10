@@ -63,6 +63,18 @@ Function RollbackHash32:UInt(data:Byte Ptr, length:Size_T, seed:UInt = $811c9dc5
 End Function
 
 Rem
+bbdoc: Computes a stable 64-bit FNV-1a hash over opaque state bytes.
+End Rem
+Function RollbackHash64:ULong(data:Byte Ptr, length:Size_T, seed:ULong = $cbf29ce484222325:ULong)
+	Local hash:ULong = seed
+	For Local index:Size_T = 0 Until length
+		hash :~ ULong(data[index]) & $ff:ULong
+		hash :* $100000001b3:ULong
+	Next
+	Return hash
+End Function
+
+Rem
 bbdoc: Identifies whether one player's frame input is absent, predicted, or confirmed.
 End Rem
 Enum ERollbackInputStatus:Byte
@@ -142,6 +154,7 @@ Type TRollbackBuffer
 	Field _frameValid:Byte[]
 	Field _stateLengths:Size_T[]
 	Field _stateHashes:UInt[]
+	Field _stateHashes64:ULong[]
 	Field _stateStorage:Byte Ptr
 	Field _inputLengths:Size_T[]
 	Field _inputStatuses:Byte[]
@@ -164,6 +177,7 @@ Type TRollbackBuffer
 		_frameValid = New Byte[capacity]
 		_stateLengths = New Size_T[capacity]
 		_stateHashes = New UInt[capacity]
+		_stateHashes64 = New ULong[capacity]
 		_inputLengths = New Size_T[maxPlayers * capacity]
 		_inputStatuses = New Byte[maxPlayers * capacity]
 		_stateStorage = MemAlloc(Size_T(capacity) * maxStateSize)
@@ -250,6 +264,10 @@ Type TRollbackBuffer
 	End Rem
 	Function Create:TRollbackBuffer(maxPlayers:Int, capacity:Int, maxStateSize:Size_T, maxInputSize:Size_T)
 		If maxPlayers < 1 Or capacity < 2 Or maxStateSize < 1 Or maxInputSize < 1 Then Return Null
+		If maxPlayers > $7fffffff / capacity Then Return Null
+		Local storageBytes:Size_T
+		If Not NetAccumulateSize(storageBytes, Size_T(capacity), maxStateSize) Then Return Null
+		If Not NetAccumulateSize(storageBytes, Size_T(maxPlayers) * Size_T(capacity), maxInputSize) Then Return Null
 		Return New TRollbackBuffer(maxPlayers, capacity, maxStateSize, maxInputSize)
 	End Function
 
@@ -302,6 +320,7 @@ Type TRollbackBuffer
 		_stateLengths[slot] = length
 		If length > 0 Then MemCopy(StateAddress(slot), state, length)
 		_stateHashes[slot] = RollbackHash32(StateAddress(slot), length)
+		_stateHashes64[slot] = RollbackHash64(StateAddress(slot), length)
 		Return True
 	End Method
 
@@ -344,6 +363,19 @@ Type TRollbackBuffer
 		Local hash:UInt
 		If Not GetStateHash(frame, hash) Then Return 0
 		Return hash
+	End Method
+
+	Rem
+	bbdoc: Gets the stored state's stable 64-bit hash.
+	returns: False when the state is unavailable.
+	End Rem
+	Method GetStateHash64:Int(frame:UInt, hash:ULong Var)
+		If Not HasFrame(frame) Or _stateLengths[FrameSlot(frame)] = 0 Then
+			hash = 0
+			Return False
+		End If
+		hash = _stateHashes64[FrameSlot(frame)]
+		Return True
 	End Method
 
 	Rem

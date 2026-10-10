@@ -175,6 +175,8 @@ Type TSnapshotTimeline
 	End Rem
 	Function Create:TSnapshotTimeline(capacity:Int, maxStateSize:Size_T)
 		If capacity < 1 Or maxStateSize < 1 Then Return Null
+		Local storageBytes:Size_T
+		If Not NetAccumulateSize(storageBytes, Size_T(capacity), maxStateSize) Then Return Null
 		Return New TSnapshotTimeline(capacity, maxStateSize)
 	End Function
 

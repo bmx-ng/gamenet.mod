@@ -35,6 +35,60 @@ ModuleInfo "History: 0.1 Initial transport contract and packet codecs"
 Import BRL.Blitz
 
 Rem
+bbdoc: Conservative packet size which avoids IP fragmentation on common Internet paths.
+about: This is guidance rather than a transport limit. Applications must still
+query #INetTransport.MaxPacketSize and account for protocol headers.
+End Rem
+Const GAMENET_RECOMMENDED_INTERNET_PACKET_SIZE:Size_T = 1200
+
+Rem
+bbdoc: Reports storage reserved by a bounded GameNet configuration before it is created.
+about: NativeBytes covers MemAlloc-backed payload buffers. ManagedArrayBytes
+covers array element storage, but deliberately excludes runtime-specific object
+and array headers. TotalPayloadBytes is therefore suitable for comparing
+configurations, not as an exact process-memory measurement.
+End Rem
+Struct SNetMemoryRequirements
+	Private
+	Field _nativeBytes:Size_T
+	Field _managedArrayBytes:Size_T
+
+	Public
+	Method New()
+	End Method
+
+	Method New(nativeBytes:Size_T, managedArrayBytes:Size_T)
+		_nativeBytes = nativeBytes
+		_managedArrayBytes = managedArrayBytes
+	End Method
+
+	Method NativeBytes:Size_T()
+		Return _nativeBytes
+	End Method
+
+	Method ManagedArrayBytes:Size_T()
+		Return _managedArrayBytes
+	End Method
+
+	Method TotalPayloadBytes:Size_T()
+		Return _nativeBytes + _managedArrayBytes
+	End Method
+End Struct
+
+Rem
+bbdoc: Safely adds @count elements of @elementSize to a byte total.
+returns: False when the multiplication or addition would overflow Size_T.
+End Rem
+Function NetAccumulateSize:Int(total:Size_T Var, count:Size_T, elementSize:Size_T)
+	Local maximum:Size_T = Size_T(-1)
+	If count > 0 And elementSize > maximum / count Then Return False
+	Local amount:Size_T = count * elementSize
+	If amount > maximum - total Then Return False
+	total :+ amount
+	Return True
+End Function
+
+Rem
 bbdoc: Specifies the delivery guarantees requested for a game message.
 End Rem
 Enum EDeliveryMode:Byte
@@ -410,6 +464,18 @@ Struct SPacketWriter
 	End Method
 
 	Rem
+	bbdoc: Writes @value in network byte order.
+	End Rem
+	Method WriteUInt64:Int(value:ULong)
+		If Not Reserve(8) Then Return False
+		For Local index:Int = 0 Until 8
+			_data[_position + Size_T(index)] = Byte(value Shr UInt(56 - index * 8))
+		Next
+		_position :+ 8
+		Return True
+	End Method
+
+	Rem
 	bbdoc: Writes the bit representation of @value in network byte order.
 	End Rem
 	Method WriteFloat32:Int(value:Float)
@@ -537,6 +603,19 @@ Struct SPacketReader
 		value :| (UInt(_data[_position + 2]) & $ff:UInt) Shl 8
 		value :| UInt(_data[_position + 3]) & $ff:UInt
 		_position :+ 4
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Reads one network-order unsigned sixty-four-bit value into @value.
+	End Rem
+	Method ReadUInt64:Int(value:ULong Var)
+		If Not Reserve(8) Then Return False
+		value = 0
+		For Local index:Int = 0 Until 8
+			value :| (ULong(_data[_position + Size_T(index)]) & $ff:ULong) Shl UInt(56 - index * 8)
+		Next
+		_position :+ 8
 		Return True
 	End Method
 

@@ -371,6 +371,8 @@ Type TNetSession
 	Field _helloLength:Size_T
 	Field _healthConfig:SSessionHealthConfig
 	Field _nowMillis:UInt
+	Field _suspended:Int
+	Field _suspendedAt:UInt
 	Field _open:Int = True
 	Field _lastProtocolError:ESessionProtocolError
 
@@ -454,6 +456,7 @@ Type TNetSession
 	End Method
 
 	Method SendWriter:ETransportResult(peer:SNetPeer, writer:SPacketWriter, channel:UInt = 0, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
+		If _suspended Then Return ETransportResult.WouldBlock
 		If writer.Failed() Then Return ETransportResult.PacketTooLarge
 		Local result:ETransportResult = _transport.Send(peer, channel, delivery, writer.View().Data(), writer.View().Length())
 		If result = ETransportResult.Ok Then
@@ -768,6 +771,7 @@ Type TNetSession
 			health = New SSessionPeerHealth
 			Return False
 		End If
+		If _suspended Then nowMillis = _suspendedAt
 		health = New SSessionPeerHealth(_peers[index].phase = ESessionPeerPhase.Active, ElapsedMillis(nowMillis, _peers[index].lastReceiveAt), _peers[index].hasRoundTrip, _peers[index].roundTripMillis, _peers[index].jitterMillis, _peers[index].probesSent, _peers[index].probesReceived, _peers[index].probesLost, _peers[index].framesSent, _peers[index].framesReceived, _peers[index].bytesSent, _peers[index].bytesReceived)
 		Return True
 	End Method
@@ -835,6 +839,10 @@ Type TNetSession
 	End Rem
 	Method PollAt:Int(event:SSessionEvent Var, nowMillis:UInt)
 		_nowMillis = nowMillis
+		If _suspended Then
+			event = New SSessionEvent
+			Return False
+		End If
 		If PollLocal(event) Then Return True
 		If Not _open Then
 			event = New SSessionEvent
@@ -867,6 +875,51 @@ Type TNetSession
 	End Rem
 	Method Poll:Int(event:SSessionEvent Var)
 		Return PollAt(event, UInt(MilliSecs()))
+	End Method
+
+	Rem
+	bbdoc: Suspends polling, sending, health probes, and health deadlines.
+	about: Call this when the application is entering the background. Existing
+	transport state is retained, but the application must still handle a queued
+	disconnect after resuming if the native connection was lost.
+	End Rem
+	Method SuspendAt:Int(nowMillis:UInt)
+		If Not _open Or _suspended Then Return False
+		_nowMillis = nowMillis
+		_suspendedAt = nowMillis
+		_suspended = True
+		Return True
+	End Method
+
+	Method Suspend:Int()
+		Return SuspendAt(UInt(MilliSecs()))
+	End Method
+
+	Rem
+	bbdoc: Resumes a suspended session without charging background time to health deadlines.
+	returns: False if the session was not suspended or has already closed.
+	End Rem
+	Method ResumeAt:Int(nowMillis:UInt)
+		If Not _open Or Not _suspended Then Return False
+		Local elapsed:UInt = nowMillis - _suspendedAt
+		For Local index:Int = 0 Until _peers.Length
+			If _peers[index].phase = ESessionPeerPhase.Empty Then Continue
+			_peers[index].connectedAt :+ elapsed
+			_peers[index].lastReceiveAt :+ elapsed
+			_peers[index].lastProbeAt :+ elapsed
+			If _peers[index].probeOutstanding Then _peers[index].probeSentAt :+ elapsed
+		Next
+		_nowMillis = nowMillis
+		_suspended = False
+		Return True
+	End Method
+
+	Method Resume:Int()
+		Return ResumeAt(UInt(MilliSecs()))
+	End Method
+
+	Method IsSuspended:Int()
+		Return _suspended
 	End Method
 
 	Method IsOpen:Int()

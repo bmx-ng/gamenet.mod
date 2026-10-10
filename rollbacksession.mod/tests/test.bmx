@@ -188,6 +188,18 @@ Check(stalledInfo.Status() = ERollbackStepStatus.Ready And stalledInfo.InputFram
 stalledSession.Stop()
 Check(stalledSession.StepStatus() = ERollbackStepStatus.Stopped, "stopped step status")
 
+' A resumed non-authority can request recovery before a hash mismatch is observed.
+Local recoverySimulation:TPlainSimulation = New TPlainSimulation
+Local recoveryConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 1, 32, 4, 1)
+Local recoverySession:TRollbackSession = TRollbackSession.Create(recoverySimulation, recoveryConfig)
+Check(recoverySession.Start(Byte Ptr(plainNeutral), 1), "start lifecycle recovery session")
+Check(recoverySession.RequestStateSync() And recoverySession.NeedsStateSync(), "request explicit state sync")
+Check(recoverySession.StateSyncMismatchFrame() = recoverySession.CurrentFrame(), "tag explicit recovery frame")
+Check(recoverySession.WriteStateSyncRequest(Byte Ptr(stalledPacket), Size_T(stalledPacket.Length)) > 0, "write explicit state sync request")
+Local authorityRecovery:TRollbackSession = TRollbackSession.Create(New TPlainSimulation, plainConfig)
+Check(authorityRecovery.Start(Byte Ptr(plainNeutral), 1), "start authority lifecycle session")
+Check(Not authorityRecovery.RequestStateSync(), "authority cannot request its own state")
+
 Local simulation0:TTestSimulation = New TTestSimulation
 Local simulation1:TTestSimulation = New TTestSimulation
 simulation1.corruptFrame = 70
@@ -295,6 +307,14 @@ Check(session0.DroppedConfirmedEffects() = 0 And session1.DroppedConfirmedEffect
 Check(Not session0.Failed() And Not session1.Failed(), "sessions remained healthy")
 Check(session0.FailureReason() = ERollbackSessionFailure.None And session1.FailureReason() = ERollbackSessionFailure.None, "recovered sessions have no fatal failure")
 Check(replayTape.FrameCount() = 151, "record every confirmed rollback frame")
+
+' Exercise a complete explicit foreground recovery without manufacturing a hash mismatch.
+Check(session1.RequestStateSync(), "request foreground state sync")
+Local resumeRequestLength:Size_T = session1.WriteStateSyncRequest(Byte Ptr(packet1), Size_T(packet1.Length))
+Local resumeResponseLength:Size_T = session0.WriteStateSyncResponse(New SPacketView(Byte Ptr(packet1), resumeRequestLength), Byte Ptr(packet0), Size_T(packet0.Length))
+Check(resumeRequestLength > 0 And resumeResponseLength > 0, "exchange foreground state sync")
+Check(session1.ReceiveStateSync(New SPacketView(Byte Ptr(packet0), resumeResponseLength)), "apply foreground state sync")
+Check(Not session1.NeedsStateSync() And session1.StateSyncCount() = 2, "complete explicit foreground recovery")
 
 Local replaySimulation:TTestSimulation = New TTestSimulation
 Local recordedInitialState:SPacketView

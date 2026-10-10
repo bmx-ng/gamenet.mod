@@ -20,6 +20,9 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.Match` adds an authoritative, backend-neutral match lifecycle with
   fixed rosters, ready and pause requests, shared seeds, countdowns, agreed
   start frames, completion, rematches, and bounded transition events.
+- `GameNet.Lifecycle` turns platform foreground/background notifications into
+  explicit events and configurable continue, resynchronise, reconnect, or
+  leave decisions, while sessions can freeze health timing during suspension.
 - `GameNet.Snapshot` optionally provides bounded snapshot history, server-clock
   estimation, and adaptive jitter delay for real-time presentation.
 - `GameNet.Prediction` optionally retains sequenced input for authoritative

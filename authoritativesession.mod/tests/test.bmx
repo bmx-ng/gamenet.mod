@@ -139,6 +139,19 @@ Check(sample.IsInterpolated() And sample.FromTick() = 60 And sample.ToTick() = 7
 Check(StateValue(sample.FromState()) = 20 And StateValue(sample.ToState()) = 30, "retain remote snapshot states")
 Check(client.RenderTick(1200) > 0.0 And client.DelayTicks() >= 2.0, "estimate delayed render tick")
 
+' Foreground recovery drops stale presentation history and waits for a local snapshot.
+Check(client.BeginRecovery() And client.IsRecovering(), "begin authoritative recovery")
+Check(client.QueueInput(Byte Ptr(inputA), 1) = 0, "hold new prediction while recovering")
+Local emptySample:SSnapshotSample
+Check(Not client.SampleEntity(1, 65.0, emptySample), "clear stale remote snapshots")
+state[0] = 40
+length = server.WriteSnapshot(0, 1, 80, Byte Ptr(state), 1, Byte Ptr(packet), Size_T(packet.Length))
+Check(client.ReceiveSnapshot(New SPacketView(Byte Ptr(packet), length), 1300, snapshot) And client.IsRecovering(), "remote snapshot does not finish recovery")
+state[0] = 50
+length = server.WriteSnapshot(0, 0, 80, Byte Ptr(state), 1, Byte Ptr(packet), Size_T(packet.Length))
+Check(client.ReceiveSnapshot(New SPacketView(Byte Ptr(packet), length), 1300, snapshot) And Not client.IsRecovering(), "local snapshot finishes recovery")
+Check(client.QueueInput(Byte Ptr(inputA), 1) > 0, "resume prediction after recovery")
+
 server.UnbindPlayer(0)
 Check(Not server.PlayerBound(0) And server.InputCount(0) = 0, "clear unbound player state")
 Check(Not client.Failed() And Not server.Failed(), "sessions remain healthy")

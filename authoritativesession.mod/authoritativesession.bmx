@@ -168,6 +168,7 @@ Type TAuthoritativeClientSession
 	Field _nextSequence:UInt = 1
 	Field _localEntity:Int = -1
 	Field _acknowledgedInput:UInt
+	Field _recovering:Int
 	Field _failed:Int
 	Field _failureReason:EAuthoritativeSessionFailure
 	Field _rejectedPackets:Int
@@ -229,6 +230,7 @@ Type TAuthoritativeClientSession
 		_delay.Clear()
 		_nextSequence = nextInputSequence
 		_acknowledgedInput = nextInputSequence - 1
+		_recovering = False
 		_failed = False
 		_failureReason = EAuthoritativeSessionFailure.None
 		_rejectedPackets = 0
@@ -253,7 +255,7 @@ Type TAuthoritativeClientSession
 	returns: Zero if the bounded input history is full or the payload is invalid.
 	End Rem
 	Method QueueInput:UInt(input:Byte Ptr, length:Size_T)
-		If _failed Or length < 1 Or length > _config.maxInputSize Or Not input Then Return 0
+		If _failed Or _recovering Or length < 1 Or length > _config.maxInputSize Or Not input Then Return 0
 		Local sequence:UInt = _nextSequence
 		If Not _history.Add(sequence, input, length) Then
 			Fail(EAuthoritativeSessionFailure.InputHistoryFull)
@@ -333,6 +335,7 @@ Type TAuthoritativeClientSession
 		End If
 		_snapshotsReceived :+ 1
 		snapshot = New SAuthoritativeSnapshot(entity, tick, acknowledged, state)
+		If _recovering And entity = _localEntity Then _recovering = False
 		Return True
 	End Method
 
@@ -370,6 +373,27 @@ Type TAuthoritativeClientSession
 
 	Method ClearEntity(entity:Int)
 		If entity >= 0 And entity < _timelines.Length Then _timelines[entity].Clear()
+	End Method
+
+	Rem
+	bbdoc: Clears stale presentation timing and waits for a fresh local authoritative snapshot.
+	about: Pending unacknowledged inputs and their sequence numbers are retained so
+	the server can acknowledge them normally. New local inputs are refused until
+	a snapshot for the configured local entity arrives.
+	End Rem
+	Method BeginRecovery:Int()
+		If _failed Or _localEntity < 0 Then Return False
+		For Local timeline:TSnapshotTimeline = EachIn _timelines
+			timeline.Clear()
+		Next
+		_clock.Clear()
+		_delay.Clear()
+		_recovering = True
+		Return True
+	End Method
+
+	Method IsRecovering:Int()
+		Return _recovering
 	End Method
 
 	Method PendingInputCount:Int()

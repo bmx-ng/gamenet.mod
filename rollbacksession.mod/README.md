@@ -98,6 +98,12 @@ irreversible presentation effect the application has already consumed. Games
 should continue to keep deterministic state compact and use confirmed effects
 for presentation work.
 
+`RequestStateSync` lets a non-authority peer enter the same recovery path
+explicitly after returning from application suspension, without waiting for a
+confirmed hash mismatch. An authority cannot use this path to replace its own
+state; it may continue only if the match was paused for everyone, otherwise it
+should reconnect or leave.
+
 `Failed` now has a corresponding `FailureReason`. Invalid network packets are
 simply rejected; a failure reason is set only when the local deterministic
 simulation can no longer safely continue.

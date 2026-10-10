@@ -35,7 +35,7 @@ ModuleInfo "History: 0.1 Initial authoritative match lifecycle"
 Import GameNet.Session
 Import BRL.Blitz
 
-Const MATCH_MAX_PLAYERS:Int = 8
+Const MATCH_MAX_PLAYERS:Int = 16
 Const MATCH_PROTOCOL_VERSION:UInt = 1
 Const MATCH_COMMAND_PACKET_SIZE:Size_T = 3
 Const MATCH_STATE_PACKET_SIZE:Size_T = 39

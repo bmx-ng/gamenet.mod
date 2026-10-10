@@ -43,6 +43,10 @@ End Type
 Local config:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(2, 2, 8, 8, 4, 2, 4, 4, 60.0, 2.0, 12.0, 10, 11, 1)
 Check(TAuthoritativeClientSession.Create(New SAuthoritativeSessionConfig) = Null, "reject invalid client configuration")
 Check(TAuthoritativeServerSession.Create(New SAuthoritativeSessionConfig) = Null, "reject invalid server configuration")
+Local maximumConfig:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(AUTHORITATIVE_SESSION_MAX_PLAYERS, AUTHORITATIVE_SESSION_MAX_PLAYERS, 8, 8, 4, 2, 4)
+Check(TAuthoritativeClientSession.Create(maximumConfig) <> Null And TAuthoritativeServerSession.Create(maximumConfig) <> Null, "support sixteen-player authoritative sessions")
+Local excessiveConfig:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(AUTHORITATIVE_SESSION_MAX_PLAYERS + 1, 1, 8, 8, 4, 2, 4)
+Check(TAuthoritativeClientSession.Create(excessiveConfig) = Null And TAuthoritativeServerSession.Create(excessiveConfig) = Null, "reject authoritative sessions above sixteen players")
 
 Local client:TAuthoritativeClientSession = TAuthoritativeClientSession.Create(config)
 Local server:TAuthoritativeServerSession = TAuthoritativeServerSession.Create(config)

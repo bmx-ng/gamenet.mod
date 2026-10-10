@@ -53,3 +53,13 @@
 /examples/networked_rollback/LaunchScreen.storyboard
 /examples/networked_rollback/client.xcodeproj/
 /examples/networked_rollback/main.m
+/examples/gamekit_session/gamekit_session
+/examples/gamekit_session/gamekit_session.console.*.build
+/examples/gamekit_session/gamekit_session.module-config*
+/examples/gamekit_session/Assets.xcassets/
+/examples/gamekit_session/DerivedData/
+/examples/gamekit_session/Info.plist
+/examples/gamekit_session/LaunchScreen.storyboard
+/examples/gamekit_session/gamekit_session.xcodeproj/
+/examples/gamekit_session/gamekitsession.entitlements
+/examples/gamekit_session/main.m

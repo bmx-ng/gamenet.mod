@@ -64,3 +64,8 @@ session, confirmed-state hashes, and repeatable delay and packet-loss testing.
 [`examples/gamekit_session`](examples/gamekit_session) programmatically
 automatches two Game Center players and validates a complete `GameNet.Session`
 handshake and message exchange over `GKMatch` on Apple devices.
+
+[`examples/gamekit_rebound`](examples/gamekit_rebound) turns the same GameKit
+matchmaking into a playable two-player fixed-point rollback game with touch and
+keyboard input, destructible shields, power returns, deterministic collisions,
+state hashes, full-state recovery, confirmed effects, and ready-up rematches.

@@ -9,6 +9,8 @@ Import BRL.StandardIO
 
 Const APP_ID:UInt = $474b5445 ' GKTE
 Const APP_VERSION:UInt = 1
+Const MATCH_MIN_PLAYERS:Int = 2
+Const MATCH_MAX_PLAYERS:Int = 2 ' Raise both values together to test a larger fixed roster.
 
 Global statusText:String = "Starting Game Center..."
 Global detailText:String = ""
@@ -16,8 +18,9 @@ Global gameCenter:TGameCenter = TGameCenter.Shared()
 Global pendingMatch:TGameCenterMatch
 Global transport:TGameKitTransport
 Global session:TNetSession
-Global remotePeer:SNetPeer
-Global joined:Int
+Global remotePeers:SNetPeer[GAMEKIT_MAX_REMOTE_PEERS]
+Global joinedCount:Int
+Global hostRole:Int
 Global sentCount:UInt
 Global receivedCount:UInt
 
@@ -70,23 +73,30 @@ Type TListener Implements IGameCenterListener, IGameCenterMultiplayerListener
 End Type
 
 Function BeginSession()
-	If Not pendingMatch Or pendingMatch.ExpectedPlayerCount() <> 0 Or pendingMatch.PlayerCount() <> 1 Then Return
-	Local other:TGameCenterPlayer = pendingMatch.Player(1)
-	If Not other Or Not gameCenter.localPlayer Then Return
-	Local hostRole:Int = gameCenter.localPlayer.gamePlayerId < other.gamePlayerId
-	transport = TGameKitTransport.Create(pendingMatch, 1, 2, 900)
+	If Not pendingMatch Or pendingMatch.ExpectedPlayerCount() <> 0 Or pendingMatch.PlayerCount() < MATCH_MIN_PLAYERS - 1 Then Return
+	If Not gameCenter.localPlayer Then Return
+	Local hostIndex:Int = GameKitElectedHostIndex(pendingMatch, gameCenter.localPlayer)
+	If hostIndex < 0 Then Return
+	hostRole = hostIndex = 0
+	transport = TGameKitTransport.Create(pendingMatch, GAMEKIT_MAX_REMOTE_PEERS, 2, 900)
 	If Not transport Then
 		statusText = "Could not create GameKit transport"
 		Return
 	End If
 	If hostRole Then
-		session = TNetSession.CreateHost(transport, APP_ID, APP_VERSION, 1, 900)
-		statusText = "Match connected; acting as session host"
+		session = TNetSession.CreateHost(transport, APP_ID, APP_VERSION, pendingMatch.PlayerCount(), 900)
+		statusText = "Match connected; hosting " + (pendingMatch.PlayerCount() + 1) + " players"
 	Else
+		If Not transport.EnableOnlyPlayer(hostIndex) Then
+			statusText = "Could not select the session host"
+			transport.Close()
+			transport = Null
+			Return
+		End If
 		session = TNetSession.CreateClient(transport, APP_ID, APP_VERSION, Null, 0, 1, 900)
 		statusText = "Match connected; joining session host"
 	End If
-	detailText = "Opponent: " + other.displayName
+	detailText = "Native GameKit players: " + (pendingMatch.PlayerCount() + 1)
 	pendingMatch = Null
 End Function
 
@@ -98,9 +108,12 @@ Function PollSession()
 			Case ESessionEventKind.JoinRequested
 				If session.Accept(event.Peer()) <> ETransportResult.Ok Then statusText = "Could not accept session peer"
 			Case ESessionEventKind.Joined
-				remotePeer = event.Peer()
-				joined = True
-				statusText = "GameNet session joined"
+				Local peerIndex:Int = Int(event.Peer().Id()) - 1
+				If peerIndex >= 0 And peerIndex < remotePeers.Length And Not remotePeers[peerIndex].IsValid() Then
+					remotePeers[peerIndex] = event.Peer()
+					joinedCount :+ 1
+				End If
+				statusText = "GameNet session joined " + joinedCount + " peer(s)"
 				detailText = "Tap Send Packet to exchange a reliable message"
 			Case ESessionEventKind.Message
 				If event.MessageType() = 1 And event.Payload().Length() = 4 Then
@@ -109,8 +122,12 @@ Function PollSession()
 					detailText = "Received packet " + receivedCount
 				End If
 			Case ESessionEventKind.Left
-				joined = False
-				statusText = "Other player left"
+				Local peerIndex:Int = Int(event.Peer().Id()) - 1
+				If peerIndex >= 0 And peerIndex < remotePeers.Length And remotePeers[peerIndex].IsValid() Then
+					remotePeers[peerIndex] = New SNetPeer
+					joinedCount = Max(0, joinedCount - 1)
+				End If
+				statusText = "A player left; " + joinedCount + " peer(s) remain"
 			Case ESessionEventKind.Rejected
 				statusText = "Session rejected: " + event.Code()
 			Case ESessionEventKind.Error
@@ -120,17 +137,19 @@ Function PollSession()
 End Function
 
 Function SendPacket()
-	If Not session Or Not joined Then Return
+	If Not session Or joinedCount = 0 Then Return
 	sentCount :+ 1
 	Local data:Byte[4]
 	Local writer:SPacketWriter = New SPacketWriter(Byte Ptr(data), Size_T(data.Length))
 	writer.WriteUInt32(sentCount)
-	Local result:ETransportResult = session.Send(remotePeer, 1, 1, EDeliveryMode.ReliableOrdered, Byte Ptr(data), Size_T(data.Length))
-	If result = ETransportResult.Ok Then
-		detailText = "Sent packet " + sentCount
-	Else
-		statusText = "Send failed: " + Int(result)
-	End If
+	Local sent:Int
+	For Local peer:SNetPeer = EachIn remotePeers
+		If peer.IsValid() Then
+			Local result:ETransportResult = session.Send(peer, 1, 1, EDeliveryMode.ReliableOrdered, Byte Ptr(data), Size_T(data.Length))
+			If result = ETransportResult.Ok Then sent :+ 1 Else statusText = "Send failed: " + Int(result)
+		End If
+	Next
+	If sent Then detailText = "Sent packet " + sentCount + " to " + sent + " peer(s)"
 End Function
 
 Graphics 800, 480
@@ -147,17 +166,17 @@ While Not AppTerminate()
 	Local buttonWidth:Float = 300
 	Local buttonHeight:Float = 70
 	Local actionText:String = "Find Match"
-	If joined Then actionText = "Send Packet"
+	If joinedCount > 0 Then actionText = "Send Packet"
 	Local pointerX:Float = VirtualMouseX()
 	Local pointerY:Float = VirtualMouseY()
 	Local pressed:Int = MouseHit(1) And pointerX >= buttonX And pointerX < buttonX + buttonWidth And pointerY >= buttonY And pointerY < buttonY + buttonHeight
 	If KeyHit(KEY_SPACE) Then pressed = True
 	If pressed Then
-		If joined Then
+		If joinedCount > 0 Then
 			SendPacket()
 		Else If gameCenter.IsAuthenticated() And Not pendingMatch And Not session Then
-			statusText = "Looking for one other player..."
-			Local requestId:Int = gameCenter.FindMatch(2, 2)
+			statusText = "Looking for " + MATCH_MIN_PLAYERS + "-" + MATCH_MAX_PLAYERS + " players..."
+			Local requestId:Int = gameCenter.FindMatch(MATCH_MIN_PLAYERS, MATCH_MAX_PLAYERS)
 			detailText = "Matchmaking request " + requestId
 		End If
 	End If

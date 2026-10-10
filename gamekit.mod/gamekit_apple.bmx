@@ -8,6 +8,7 @@ Const GAMEKIT_FRAME_MAGIC:UInt = $474e474b ' GNGK
 Const GAMEKIT_FRAME_VERSION:UInt = 1
 Const GAMEKIT_FRAME_HEADER_SIZE:Size_T = 12
 Const GAMEKIT_DEFAULT_MAX_PACKET_SIZE:Size_T = 900
+Const GAMEKIT_MAX_REMOTE_PEERS:Int = 15
 
 Rem
 bbdoc: Adapter-owned failures reported through #SNetEvent.Error.
@@ -17,6 +18,7 @@ Enum EGameKitTransportError:Int
 	IncomingPacketTooLarge
 	InvalidFrame
 	InvalidPlayer
+	MatchClosed
 End Enum
 
 Rem
@@ -65,6 +67,28 @@ End Type
 Public
 
 Rem
+bbdoc: Returns the stable match index of the deterministically elected host, or zero when the local player is host.
+returns: -1 when the match or local player identity is unavailable.
+about: Election uses the lexically lowest Game Center game-player identifier
+among the local player and every remote participant. Every participant can
+therefore make the same decision without exchanging a packet.
+End Rem
+Function GameKitElectedHostIndex:Int(match:TGameCenterMatch, localPlayer:TGameCenterPlayer)
+	If Not match Or Not localPlayer Or Not localPlayer.gamePlayerId Then Return -1
+	Local electedIndex:Int
+	Local electedId:String = localPlayer.gamePlayerId
+	For Local playerIndex:Int = 1 To match.PlayerCount()
+		Local player:TGameCenterPlayer = match.Player(playerIndex)
+		If Not player Or Not player.gamePlayerId Then Return -1
+		If player.gamePlayerId < electedId Then
+			electedId = player.gamePlayerId
+			electedIndex = playerIndex
+		End If
+	Next
+	Return electedIndex
+End Function
+
+Rem
 bbdoc: Adapts one real-time Game Center match to #INetTransport.
 about: GameKit supplies reliable and unreliable packets but no logical
 channels or unreliable-sequenced mode. This adapter adds a small frame header
@@ -85,12 +109,14 @@ Type TGameKitTransport Implements INetTransport
 	Field _receiveBuffer:Byte Ptr
 	Field _sendBuffer:Byte Ptr
 	Field _active:Byte[]
+	Field _enabled:Byte[]
 	Field _pendingDisconnect:Byte[]
 	Field _pendingDisconnectCode:Int[]
 	Field _sendSequence:UInt[]
 	Field _receiveSequence:UInt[]
 	Field _receiveSequenceSeen:Byte[]
 	Field _open:Int = True
+	Field _started:Int
 	Field _lastError:TGameCenterError
 
 	Method New(backend:IGameKitMatchBackend, maximumPeers:Int, channelCount:Int, maxPacketSize:Size_T)
@@ -102,6 +128,10 @@ Type TGameKitTransport Implements INetTransport
 		_receiveBuffer = MemAlloc(_wireCapacity)
 		_sendBuffer = MemAlloc(_wireCapacity)
 		_active = New Byte[maximumPeers]
+		_enabled = New Byte[maximumPeers]
+		For Local index:Int = 0 Until maximumPeers
+			_enabled[index] = True
+		Next
 		_pendingDisconnect = New Byte[maximumPeers]
 		_pendingDisconnectCode = New Int[maximumPeers]
 		_sendSequence = New UInt[channelCount]
@@ -120,6 +150,14 @@ Type TGameKitTransport Implements INetTransport
 
 	Method SequenceIndex:Int(playerIndex:Int, channel:UInt)
 		Return (playerIndex - 1) * _channelCount + Int(channel)
+	End Method
+
+	Method ClearReceiveSequences(playerIndex:Int)
+		For Local channel:Int = 0 Until _channelCount
+			Local index:Int = SequenceIndex(playerIndex, UInt(channel))
+			_receiveSequence[index] = 0
+			_receiveSequenceSeen[index] = False
+		Next
 	End Method
 
 	Method NextPendingDisconnect:Int()
@@ -154,7 +192,7 @@ Type TGameKitTransport Implements INetTransport
 	Rem
 	bbdoc: Creates a GameNet transport which owns @match until #Close.
 	End Rem
-	Function Create:TGameKitTransport(match:TGameCenterMatch, maximumPeers:Int = 8, channelCount:Int = 4, maxPacketSize:Size_T = GAMEKIT_DEFAULT_MAX_PACKET_SIZE)
+	Function Create:TGameKitTransport(match:TGameCenterMatch, maximumPeers:Int = GAMEKIT_MAX_REMOTE_PEERS, channelCount:Int = 4, maxPacketSize:Size_T = GAMEKIT_DEFAULT_MAX_PACKET_SIZE)
 		Return CreateForBackend(TAppleGameKitMatchBackend.Create(match), maximumPeers, channelCount, maxPacketSize)
 	End Function
 
@@ -162,8 +200,8 @@ Type TGameKitTransport Implements INetTransport
 	bbdoc: Creates a transport over a custom low-level match implementation.
 	about: This extension point primarily supports deterministic transport tests.
 	End Rem
-	Function CreateForBackend:TGameKitTransport(backend:IGameKitMatchBackend, maximumPeers:Int = 8, channelCount:Int = 4, maxPacketSize:Size_T = GAMEKIT_DEFAULT_MAX_PACKET_SIZE)
-		If Not backend Or maximumPeers < 1 Or channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Then Return Null
+	Function CreateForBackend:TGameKitTransport(backend:IGameKitMatchBackend, maximumPeers:Int = GAMEKIT_MAX_REMOTE_PEERS, channelCount:Int = 4, maxPacketSize:Size_T = GAMEKIT_DEFAULT_MAX_PACKET_SIZE)
+		If Not backend Or maximumPeers < 1 Or maximumPeers > GAMEKIT_MAX_REMOTE_PEERS Or channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Then Return Null
 		Return New TGameKitTransport(backend, maximumPeers, channelCount, maxPacketSize)
 	End Function
 
@@ -174,7 +212,35 @@ Type TGameKitTransport Implements INetTransport
 		Return _lastError
 	End Method
 
+	Rem
+	bbdoc: Enables or hides a stable Game Center player before transport polling begins.
+	about: Hidden participants remain in the native full-mesh GKMatch but produce
+	no GameNet connection, data, or disconnection events and cannot be sent to.
+	This permits client sessions to expose only an elected host.
+	End Rem
+	Method SetPlayerEnabled:Int(playerIndex:Int, enabled:Int)
+		If _started Or playerIndex < 1 Or playerIndex > _maximumPeers Then Return False
+		_enabled[playerIndex - 1] = enabled <> 0
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Hides every participant except one elected host before polling begins.
+	End Rem
+	Method EnableOnlyPlayer:Int(playerIndex:Int)
+		If _started Or playerIndex < 1 Or playerIndex > _maximumPeers Then Return False
+		For Local index:Int = 0 Until _maximumPeers
+			_enabled[index] = index = playerIndex - 1
+		Next
+		Return True
+	End Method
+
+	Method PlayerEnabled:Int(playerIndex:Int)
+		Return playerIndex >= 1 And playerIndex <= _maximumPeers And _enabled[playerIndex - 1]
+	End Method
+
 	Method Poll:Int(event:SNetEvent Var) Override
+		_started = True
 		Local pendingIndex:Int = NextPendingDisconnect()
 		If pendingIndex >= 0 Then
 			_pendingDisconnect[pendingIndex] = False
@@ -185,6 +251,11 @@ Type TGameKitTransport Implements INetTransport
 		While _open
 			Local matchEvent:SGameCenterMatchEvent
 			If Not _backend.Poll(matchEvent, _receiveBuffer, _wireCapacity) Then
+				If Not _backend.IsOpen() Then
+					EndMatch(0)
+					event = SNetEvent.Error(New SNetPeer, Int(EGameKitTransportError.MatchClosed))
+					Return True
+				End If
 				event = New SNetEvent
 				Return False
 			End If
@@ -195,6 +266,8 @@ Type TGameKitTransport Implements INetTransport
 						event = SNetEvent.Error(New SNetPeer, Int(EGameKitTransportError.InvalidPlayer))
 						Return True
 					End If
+					If Not _enabled[playerIndex - 1] Or _active[playerIndex - 1] Then Continue
+					ClearReceiveSequences(playerIndex)
 					_active[playerIndex - 1] = True
 					event = SNetEvent.Connected(PeerForIndex(playerIndex))
 					Return True
@@ -204,7 +277,9 @@ Type TGameKitTransport Implements INetTransport
 						event = SNetEvent.Error(New SNetPeer, Int(EGameKitTransportError.InvalidPlayer))
 						Return True
 					End If
+					If Not _enabled[playerIndex - 1] Or Not _active[playerIndex - 1] Then Continue
 					_active[playerIndex - 1] = False
+					ClearReceiveSequences(playerIndex)
 					event = SNetEvent.Disconnected(PeerForIndex(playerIndex))
 					Return True
 
@@ -219,6 +294,7 @@ Type TGameKitTransport Implements INetTransport
 						event = SNetEvent.Error(PeerForIndex(playerIndex), Int(EGameKitTransportError.IncomingPacketTooLarge))
 						Return True
 					End If
+					If playerIndex >= 1 And playerIndex <= _maximumPeers And Not _enabled[playerIndex - 1] Then Continue
 					If playerIndex < 1 Or playerIndex > _maximumPeers Or Not _active[playerIndex - 1] Or matchEvent.DataLength() < GAMEKIT_FRAME_HEADER_SIZE Then
 						event = SNetEvent.Error(New SNetPeer, Int(EGameKitTransportError.InvalidFrame))
 						Return True
@@ -258,7 +334,7 @@ Type TGameKitTransport Implements INetTransport
 	Method Send:ETransportResult(peer:SNetPeer, channel:UInt, delivery:EDeliveryMode, data:Byte Ptr, length:Size_T) Override
 		If Not _open Or Not _backend.IsOpen() Then Return ETransportResult.Closed
 		Local playerIndex:Int = PlayerIndex(peer)
-		If playerIndex < 1 Or Not _active[playerIndex - 1] Then Return ETransportResult.InvalidPeer
+		If playerIndex < 1 Or Not _enabled[playerIndex - 1] Or Not _active[playerIndex - 1] Then Return ETransportResult.InvalidPeer
 		If channel >= UInt(_channelCount) Then Return ETransportResult.InvalidChannel
 		If Int(delivery) < Int(EDeliveryMode.Unreliable) Or Int(delivery) > Int(EDeliveryMode.ReliableOrdered) Then Return ETransportResult.Failed
 		If length > _maxPacketSize Then Return ETransportResult.PacketTooLarge

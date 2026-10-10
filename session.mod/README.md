@@ -37,3 +37,12 @@ health probes before probes are enabled. Probe loss describes unanswered health
 probes; it is not a measurement of every unreliable application packet. Poll
 regularly because measured latency necessarily includes time waiting in the
 local event queue.
+
+## Application suspension
+
+Call `SuspendAt` immediately before the application stops polling in the
+background. Sending then returns `WouldBlock`, polling is paused, and peer idle,
+handshake, and probe clocks stop advancing. `ResumeAt` shifts those clocks by
+the suspended duration before polling resumes. A disconnect which occurred in
+the native transport while suspended will still be returned normally after
+resumption. `GameNet.Lifecycle` provides the higher-level recovery policy.

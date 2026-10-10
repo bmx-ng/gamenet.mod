@@ -44,3 +44,8 @@ then calls `AcknowledgeInput`. At its chosen snapshot frequency it calls
 All capacities are fixed by `SAuthoritativeSessionConfig`. Normal input,
 snapshot, acknowledgement, reconciliation, and interpolation operations reuse
 preallocated storage.
+
+After an application suspension, `BeginRecovery` clears stale snapshot and
+clock history, temporarily refuses new prediction input, and waits for a fresh
+snapshot of the configured local entity. Existing unacknowledged inputs remain
+available for normal server acknowledgement and reconciliation.

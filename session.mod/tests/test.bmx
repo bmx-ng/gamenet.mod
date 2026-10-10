@@ -148,4 +148,27 @@ Check(host.PollAt(event, 100) And event.Kind() = ESessionEventKind.Left And even
 host.Close()
 client.Close()
 
+' Background time is excluded from idle/probe accounting and session traffic is paused.
+pair = TLoopbackPair.Create(16, 1200)
+host = TNetSession.CreateHost(pair.First(), APP_ID, APP_VERSION, 1, 1200)
+client = TNetSession.CreateClient(pair.Second(), APP_ID, APP_VERSION, Null, 0, 1, 1200)
+Check(host.ConfigureHealth(idleConfig) And client.ConfigureHealth(idleConfig), "configure suspended idle timeout")
+Check(Not client.PollAt(event, 0), "suspended client hello")
+Check(host.PollAt(event, 0) And event.Kind() = ESessionEventKind.JoinRequested, "suspended host join request")
+hostPeer = event.Peer()
+Check(host.Accept(hostPeer) = ETransportResult.Ok, "accept suspended peer")
+Check(host.PollAt(event, 0) And event.Kind() = ESessionEventKind.Joined, "suspended host joined")
+Check(client.PollAt(event, 0) And event.Kind() = ESessionEventKind.Joined, "suspended client joined")
+clientPeer = event.Peer()
+Check(host.SuspendAt(50) And host.IsSuspended(), "suspend session")
+Check(host.Send(hostPeer, 1, 0, EDeliveryMode.ReliableOrdered) = ETransportResult.WouldBlock, "block sends while suspended")
+Check(Not host.PollAt(event, 10000), "do not poll transport while suspended")
+Local suspendedHealth:SSessionPeerHealth
+Check(host.GetPeerHealth(hostPeer, 10000, suspendedHealth) And suspendedHealth.IdleMillis() = 50, "freeze health age while suspended")
+Check(host.ResumeAt(10000) And Not host.IsSuspended(), "resume session")
+Check(Not host.PollAt(event, 10049), "background time does not trigger idle timeout")
+Check(host.PollAt(event, 10050) And event.Kind() = ESessionEventKind.Left And event.Code() = Int(ESessionDisconnectCode.IdleTimeout), "active time still triggers idle timeout")
+host.Close()
+client.Close()
+
 Print "GameNet.Session tests passed"

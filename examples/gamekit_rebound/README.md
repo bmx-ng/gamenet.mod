@@ -18,6 +18,11 @@ The example keeps six frames of local input delay, eighteen frames of
 prediction headroom, and twenty-four redundant input frames to tolerate the
 latency and short delivery bursts commonly seen on Wi-Fi GameKit matches.
 
+The example also connects SDL's mobile foreground/background notifications to
+`GameNet.Lifecycle`. It requests a shared match pause before suspension, freezes
+session health timing, and on return either continues, requests authoritative
+rollback state, or leaves a connection which has been stale for too long.
+
 Before building, replace the example bundle identifier in
 `gamekit_rebound.settings` with an App Store Connect application that has Game
 Center enabled. Sign the generated project with your development team. Run the

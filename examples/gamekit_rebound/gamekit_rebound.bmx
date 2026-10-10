@@ -5,7 +5,9 @@ Import Apple.GameKit
 Import GameNet.GameKit
 Import GameNet.Session
 Import GameNet.Match
+Import GameNet.Lifecycle
 Import GameNet.RollbackSession
+Import SDL3.SDL3System
 Import Max2D.VirtualJoystick
 Import BRL.PolledInput
 Import BRL.StandardIO
@@ -47,6 +49,13 @@ Global stalledRenders:Int
 Global multiStepRenders:Int
 Global maximumStepsPerRender:Int
 Global previousPower:Int
+Global appLifecycle:TAppLifecycle = TAppLifecycle.Create()
+Global resumeAction:EAppResumeAction
+Global resumePending:Int
+Global waitingForStateSync:Int
+Global resumeDecisionAt:UInt
+Global recoveryStartedAt:UInt
+Global lastRecoveryRequestAt:UInt
 
 Function ErrorText:String(error:TGameCenterError)
 	If Not error Then Return ""
@@ -55,6 +64,95 @@ End Function
 
 Function FixedToFloat:Float(value:Int)
 	Return Float(value) / Float(REBOUND_SCALE)
+End Function
+
+Function SetLocalMatchPaused(paused:Int, now:UInt)
+	If matchLifecycle And (matchLifecycle.Phase() = EMatchPhase.Running Or matchLifecycle.Phase() = EMatchPhase.Paused) Then
+		matchLifecycle.SetLocalPaused(paused, now)
+	End If
+End Function
+
+Function ApplicationLifecycle(data:Object, event:Int)
+	Local now:UInt = UInt(MilliSecs())
+	Select event
+		Case SDL_EVENT_WILL_ENTER_BACKGROUND
+			If appLifecycle.SuspendAt(now) Then
+				' Give the shared lifecycle its best opportunity to pause every player.
+				SetLocalMatchPaused(True, now)
+				If session Then session.SuspendAt(now)
+			End If
+		Case SDL_EVENT_DID_ENTER_FOREGROUND
+			If appLifecycle.IsSuspended() Then
+				If session Then session.ResumeAt(now)
+				Local connected:Int = True
+				If session Then connected = session.IsOpen()
+				resumeAction = appLifecycle.ResumeAt(now, connected)
+				resumePending = True
+				resumeDecisionAt = now + 500
+			End If
+		Case SDL_EVENT_TERMINATING
+			appLifecycle.Terminate()
+	End Select
+End Function
+
+Function LeaveStaleMatch(reason:String)
+	If rollbackGame Then rollbackGame.Stop()
+	If session Then session.Close()
+	session = Null
+	transport = Null
+	matchLifecycle = Null
+	remotePeer = New SNetPeer
+	joined = False
+	waitingForStateSync = False
+	lastRecoveryRequestAt = 0
+	statusText = reason
+	detailText = "Find a new match to continue"
+End Function
+
+Function ProcessApplicationResume(now:UInt)
+	If waitingForStateSync Then
+		If rollbackGame And Not rollbackGame.NeedsStateSync() Then
+			waitingForStateSync = False
+			lastRecoveryRequestAt = 0
+			SetLocalMatchPaused(False, now)
+			statusText = "Rebound match running"
+			detailText = "Recovered after returning to the game"
+		Else If now - recoveryStartedAt >= 5000 Then
+			LeaveStaleMatch("Could not resynchronise the match")
+			Return
+		End If
+	End If
+	If Not resumePending Then Return
+	If session And Not joined Then resumeAction = EAppResumeAction.Reconnect
+	If resumeAction = EAppResumeAction.Resynchronise Then
+		' The authority's replicated pause proves both simulations stopped. It is
+		' safer and quicker to resume that agreed timeline than replace its state.
+		If matchLifecycle And matchLifecycle.Phase() = EMatchPhase.Paused And matchLifecycle.PlayerPaused(localPlayer) Then
+			resumeAction = EAppResumeAction.Continue
+		Else If Int(now - resumeDecisionAt) < 0 Then
+			statusText = "Restoring match..."
+			Return
+		End If
+	End If
+	resumePending = False
+	Select resumeAction
+		Case EAppResumeAction.Continue
+			SetLocalMatchPaused(False, now)
+		Case EAppResumeAction.Resynchronise
+			If rollbackGame And rollbackGame.IsRunning() And Not rollbackGame.IsAuthority() And rollbackGame.RequestStateSync() Then
+				waitingForStateSync = True
+				recoveryStartedAt = now
+				lastRecoveryRequestAt = 0
+				statusText = "Resynchronising after interruption..."
+			Else
+				' The authority remains canonical if the shared pause reached its peer.
+				SetLocalMatchPaused(False, now)
+			End If
+		Case EAppResumeAction.Reconnect
+			LeaveStaleMatch("Connection interrupted")
+		Case EAppResumeAction.Leave
+			LeaveStaleMatch("Match left after a long interruption")
+	End Select
 End Function
 
 Function ConfirmedFrameText:String(game:TRollbackSession)
@@ -226,7 +324,10 @@ Function PollNetwork(now:Int)
 		End Select
 	Wend
 	If rollbackGame And rollbackGame.IsRunning() And rollbackGame.NeedsStateSync() Then
-		rollbackGame.SendStateSyncRequest(session, remotePeer, REBOUND_MSG_STATE_SYNC_REQUEST, REBOUND_CONTROL_CHANNEL, Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
+		If lastRecoveryRequestAt = 0 Or UInt(now) - lastRecoveryRequestAt >= 1000 Then
+			Local length:Size_T = rollbackGame.WriteStateSyncRequest(Byte Ptr(packetBuffer), Size_T(packetBuffer.Length))
+			If length > 0 And session.Send(remotePeer, REBOUND_MSG_STATE_SYNC_REQUEST, REBOUND_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(packetBuffer), length) = ETransportResult.Ok Then lastRecoveryRequestAt = UInt(now)
+		End If
 	End If
 End Function
 
@@ -342,6 +443,7 @@ Graphics 1280, 720
 SetVirtualResolution(REBOUND_WORLD_WIDTH, REBOUND_WORLD_HEIGHT, VIRTUAL_LETTERBOX)
 SetVirtualBarColor 5, 8, 15
 SetClsColor 17, 25, 43
+SetLifecycleCallback(ApplicationLifecycle)
 
 Local controls:TVirtualJoystick = TVirtualJoystick.Create(3, "Rebound controls")
 controls.SetStickEnabled(False)
@@ -375,6 +477,7 @@ While Not AppTerminate() And Not KeyDown(KEY_ESCAPE)
 	BeginNetworkSession()
 	PollNetwork(now)
 	ProcessMatchLifecycle(now)
+	ProcessApplicationResume(UInt(now))
 
 	Local movement:Int
 	If controls.ButtonDown(0) Or KeyDown(KEY_W) Or KeyDown(KEY_UP) Then movement :- 127
@@ -457,6 +560,7 @@ While Not AppTerminate() And Not KeyDown(KEY_ESCAPE)
 Wend
 
 controls.Free()
+SetLifecycleCallback(Null)
 If session Then session.Close()
 If pendingMatch Then pendingMatch.Disconnect()
 gameCenter.Stop()

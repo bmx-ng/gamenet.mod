@@ -885,9 +885,25 @@ Type TRollbackSession Implements IRollbackEffectWriter
 	End Method
 
 	Rem
+	bbdoc: Requests an authoritative state refresh without waiting for a hash mismatch.
+	about: This is intended for foreground recovery after the local simulation was
+	suspended. Only a running non-authority peer can request state from the
+	configured authority. Repeated calls keep the current recovery request.
+	End Rem
+	Method RequestStateSync:Int()
+		If Not _running Or _failed Or _config.localPlayer = _config.authorityPlayer Then Return False
+		If Not _needsStateSync Then
+			_needsStateSync = True
+			_stateSyncRequestSent = False
+			_stateSyncMismatchFrame = _currentFrame
+		End If
+		Return True
+	End Method
+
+	Rem
 	bbdoc: Writes a request for an authoritative confirmed state snapshot.
-	about: The request is available only after this non-authority peer detects a
-	confirmed hash mismatch. Send it reliably and in order. Calling this method
+	about: The request is available after this non-authority peer detects a
+	confirmed hash mismatch or calls #RequestStateSync. Send it reliably and in order. Calling this method
 	does not mark the request as sent, so custom transports may retry it.
 	End Rem
 	Method WriteStateSyncRequest:Size_T(buffer:Byte Ptr, capacity:Size_T)

@@ -17,6 +17,9 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.Session` adds a versioned handshake, framed application messages,
   optional handshake/idle timeouts, keepalive probes, and per-peer health
   statistics above any GameNet transport.
+- `GameNet.Match` adds an authoritative, backend-neutral match lifecycle with
+  fixed rosters, ready and pause requests, shared seeds, countdowns, agreed
+  start frames, completion, rematches, and bounded transition events.
 - `GameNet.Snapshot` optionally provides bounded snapshot history, server-clock
   estimation, and adaptive jitter delay for real-time presentation.
 - `GameNet.Prediction` optionally retains sequenced input for authoritative
@@ -68,4 +71,5 @@ handshake and message exchange over `GKMatch` on Apple devices.
 [`examples/gamekit_rebound`](examples/gamekit_rebound) turns the same GameKit
 matchmaking into a playable two-player fixed-point rollback game with touch and
 keyboard input, destructible shields, power returns, deterministic collisions,
-state hashes, full-state recovery, confirmed effects, and ready-up rematches.
+state hashes, full-state recovery, confirmed effects, and a transport-neutral
+`GameNet.Match` lifecycle for ready-up, countdown, completion, and rematches.

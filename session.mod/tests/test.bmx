@@ -90,6 +90,7 @@ Local malformed:Byte[2]
 Check(raw.Send(raw.RemotePeer(), 0, EDeliveryMode.ReliableOrdered, Byte Ptr(malformed), Size_T(malformed.Length)) = ETransportResult.Ok, "send malformed packet")
 Check(AwaitEvent(host, ESessionEventKind.Error, event), "malformed packet error")
 Check(event.Code() = Int(ESessionRejectCode.ProtocolViolation), "malformed packet error code")
+Check(host.LastProtocolError() = ESessionProtocolError.MalformedHeader, "malformed packet diagnostic")
 host.Close()
 raw.Close()
 

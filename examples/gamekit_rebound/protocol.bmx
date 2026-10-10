@@ -1,19 +1,20 @@
 Const REBOUND_APP_ID:UInt = $52424e44 ' RBND
-Const REBOUND_APP_VERSION:UInt = 2
+Const REBOUND_APP_VERSION:UInt = 3
 
 Const REBOUND_CONTROL_CHANNEL:UInt = 0
 Const REBOUND_GAMEPLAY_CHANNEL:UInt = 1
 
-Const REBOUND_MSG_START:UInt = 1
 Const REBOUND_MSG_INPUT:UInt = 2
 Const REBOUND_MSG_HASH:UInt = 3
 Const REBOUND_MSG_STATE_SYNC_REQUEST:UInt = 4
 Const REBOUND_MSG_STATE_SYNC_RESPONSE:UInt = 5
+Const REBOUND_MSG_MATCH_COMMAND:UInt = 6
+Const REBOUND_MSG_MATCH_STATE:UInt = 7
 
 Const REBOUND_PLAYER_COUNT:Int = 2
 Const REBOUND_INPUT_SIZE:Size_T = 2
-Const REBOUND_STATE_SIZE:Size_T = 60
-Const REBOUND_INPUT_BATCH_MAX:Int = 12
+Const REBOUND_STATE_SIZE:Size_T = 56
+Const REBOUND_INPUT_BATCH_MAX:Int = 24
 
 Const REBOUND_WORLD_WIDTH:Int = 800
 Const REBOUND_WORLD_HEIGHT:Int = 450
@@ -52,7 +53,6 @@ Struct SReboundState
 	Field energy1:Int
 	Field serveFrames:Int
 	Field winner:Int
-	Field readyMask:Int
 	Field randomState:UInt
 	Field pointNumber:Int
 End Struct
@@ -77,18 +77,6 @@ Function DecodeReboundInput:Int(packet:SPacketView, movement:Int Var, power:Int 
 	If movement < -127 Or movement > 127 Then Return False
 	power = (flags & REBOUND_INPUT_POWER) <> 0
 	Return True
-End Function
-
-Function EncodeReboundStart:Size_T(buffer:Byte Ptr, capacity:Size_T, seed:UInt)
-	Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
-	writer.WriteUInt32(seed)
-	If writer.Failed() Then Return 0
-	Return writer.Position()
-End Function
-
-Function DecodeReboundStart:Int(packet:SPacketView, seed:UInt Var)
-	Local reader:SPacketReader = New SPacketReader(packet)
-	Return reader.ReadUInt32(seed) And reader.Remaining() = 0
 End Function
 
 Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulation
@@ -120,7 +108,6 @@ Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulatio
 		_state.energy0 = 0
 		_state.energy1 = 0
 		_state.winner = -1
-		_state.readyMask = 0
 		_state.pointNumber = 0
 		Local direction:Int = -1
 		If (NextRandom() & 1) Then direction = 1
@@ -226,7 +213,7 @@ Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulatio
 		writer.WriteUInt32(UInt(_state.score0)); writer.WriteUInt32(UInt(_state.score1))
 		writer.WriteUInt32(UInt(_state.energy0)); writer.WriteUInt32(UInt(_state.energy1))
 		writer.WriteUInt32(UInt(_state.serveFrames)); writer.WriteUInt32(UInt(_state.winner))
-		writer.WriteUInt32(UInt(_state.readyMask)); writer.WriteUInt32(_state.randomState)
+		writer.WriteUInt32(_state.randomState)
 		writer.WriteUInt32(UInt(_state.pointNumber))
 		If writer.Failed() Then Return 0
 		Return writer.Position()
@@ -234,7 +221,7 @@ Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulatio
 
 	Method LoadState:Int(packet:SPacketView)
 		Local reader:SPacketReader = New SPacketReader(packet)
-		Local values:UInt[15]
+		Local values:UInt[14]
 		For Local index:Int = 0 Until values.Length
 			If Not reader.ReadUInt32(values[index]) Then Return False
 		Next
@@ -245,8 +232,8 @@ Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulatio
 		_state.score0 = Int(values[6]); _state.score1 = Int(values[7])
 		_state.energy0 = Int(values[8]); _state.energy1 = Int(values[9])
 		_state.serveFrames = Int(values[10]); _state.winner = Int(values[11])
-		_state.readyMask = Int(values[12]); _state.randomState = values[13]
-		_state.pointNumber = Int(values[14])
+		_state.randomState = values[12]
+		_state.pointNumber = Int(values[13])
 		Return True
 	End Method
 
@@ -271,10 +258,6 @@ Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulatio
 		Next
 
 		If _state.winner >= 0 Then
-			For Local player:Int = 0 Until REBOUND_PLAYER_COUNT
-				If powers[player] Then _state.readyMask :| (1 Shl player)
-			Next
-			If _state.readyMask = 3 Then ResetMatch()
 			Return True
 		End If
 
@@ -354,7 +337,4 @@ Type TReboundSimulation Implements IRollbackSimulation, IRollbackEffectSimulatio
 		Return _state.winner
 	End Method
 
-	Method Ready:Int(player:Int)
-		Return (_state.readyMask & (1 Shl player)) <> 0
-	End Method
 End Type

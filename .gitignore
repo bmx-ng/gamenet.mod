@@ -63,3 +63,14 @@
 /examples/gamekit_session/gamekit_session.xcodeproj/
 /examples/gamekit_session/gamekitsession.entitlements
 /examples/gamekit_session/main.m
+/examples/gamekit_rebound/gamekit_rebound
+/examples/gamekit_rebound/test_protocol
+/examples/gamekit_rebound/gamekit_rebound.console.*.build
+/examples/gamekit_rebound/gamekit_rebound.module-config*
+/examples/gamekit_rebound/Assets.xcassets/
+/examples/gamekit_rebound/DerivedData/
+/examples/gamekit_rebound/Info.plist
+/examples/gamekit_rebound/LaunchScreen.storyboard
+/examples/gamekit_rebound/gamekit_rebound.xcodeproj/
+/examples/gamekit_rebound/gamekitrebound.entitlements
+/examples/gamekit_rebound/main.m

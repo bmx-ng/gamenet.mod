@@ -5,7 +5,7 @@ Import BRL.Math
 Import BRL.System
 Import GameNet.Session
 Import GameNet.ENet
-Import GameNet.Prediction
+Import GameNet.AuthoritativeSession
 
 Include "protocol.bmx"
 
@@ -16,19 +16,15 @@ Struct SServerPlayer
 	Field active:Int
 	Field x:Float
 	Field y:Float
-	Field receiveSequencer:SPredictionSequencer
-	Field inputQueue:TPredictionHistory
 	Field inputStarted:Int
-	Field lastProcessedInput:UInt
 End Struct
 
 Global session:TNetSession
+Global authoritative:TAuthoritativeServerSession
 Global players:SServerPlayer[AUTHORITATIVE_MAX_PLAYERS]
 Global sendBuffer:Byte[32]
+Global snapshotStateBuffer:Byte[AUTHORITATIVE_SNAPSHOT_STATE_SIZE]
 Global serverTick:UInt
-Global inputSequences:UInt[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
-Global inputXs:Int[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
-Global inputYs:Int[AUTHORITATIVE_INPUT_HISTORY_CAPACITY]
 
 Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int)
 	Local moveX:Float = Float(inputX) / 127.0
@@ -87,12 +83,12 @@ Function AnnounceLeftPlayer(leftIndex:Int)
 End Function
 
 Function SendSnapshots()
-	For Local recipientIndex:Int = 0 Until players.Length
-		If Not players[recipientIndex].active Then Continue
-		For Local playerIndex:Int = 0 Until players.Length
-			If Not players[playerIndex].active Then Continue
-			Local length:Size_T = EncodeSnapshot(Byte Ptr(sendBuffer), Size_T(sendBuffer.Length), UInt(playerIndex + 1), serverTick, players[playerIndex].lastProcessedInput, players[playerIndex].x, players[playerIndex].y)
-			session.Send(players[recipientIndex].peer, MSG_SNAPSHOT, GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(sendBuffer), length)
+	For Local playerIndex:Int = 0 Until players.Length
+		If Not players[playerIndex].active Then Continue
+		Local length:Size_T = EncodePositionState(Byte Ptr(snapshotStateBuffer), Size_T(snapshotStateBuffer.Length), players[playerIndex].x, players[playerIndex].y)
+		If length = 0 Then Continue
+		For Local recipientIndex:Int = 0 Until players.Length
+			If players[recipientIndex].active Then authoritative.SendSnapshot(session, recipientIndex, playerIndex, serverTick, Byte Ptr(snapshotStateBuffer), length)
 		Next
 	Next
 End Function
@@ -102,6 +98,9 @@ If Not transport Then Throw "Could not listen on UDP port " + AUTHORITATIVE_PORT
 
 session = TNetSession.CreateHost(transport, AUTHORITATIVE_APP_ID, AUTHORITATIVE_APP_VERSION, AUTHORITATIVE_MAX_PLAYERS, 1200)
 If Not session Then Throw "Could not create the host session"
+Local authoritativeConfig:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(AUTHORITATIVE_MAX_PLAYERS, AUTHORITATIVE_MAX_PLAYERS, AUTHORITATIVE_INPUT_HISTORY_CAPACITY, AUTHORITATIVE_SERVER_INPUT_CAPACITY, AUTHORITATIVE_SNAPSHOT_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE, AUTHORITATIVE_SNAPSHOT_STATE_SIZE, AUTHORITATIVE_REDUNDANT_INPUTS, 60.0, 2.0, 12.0, MSG_INPUT, MSG_SNAPSHOT, GAMEPLAY_CHANNEL)
+authoritative = TAuthoritativeServerSession.Create(authoritativeConfig)
+If Not authoritative Then Throw "Could not create the authoritative server session"
 
 Local previousTime:Int = MilliSecs()
 Local snapshotTime:Int = previousTime
@@ -130,35 +129,26 @@ While session.IsOpen()
 					players[index].active = True
 					players[index].x = WORLD_WIDTH * (Float(index + 1) / Float(AUTHORITATIVE_MAX_PLAYERS + 1))
 					players[index].y = WORLD_HEIGHT * 0.5
-					players[index].receiveSequencer.Reset(1)
-					players[index].inputQueue = TPredictionHistory.Create(AUTHORITATIVE_SERVER_INPUT_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE)
 					players[index].inputStarted = False
-					players[index].lastProcessedInput = 0
-					AnnounceJoinedPlayer(index)
-					Print "Player " + (index + 1) + " joined"
+					If authoritative.BindPlayer(index, event.Peer()) Then
+						AnnounceJoinedPlayer(index)
+						Print "Player " + (index + 1) + " joined"
+					Else
+						Throw "Could not bind authoritative player " + (index + 1)
+					End If
 				End If
 
 			Case ESessionEventKind.Message
 				Local index:Int = PlayerIndexForPeer(event.Peer())
-				If index >= 0 And players[index].active And event.MessageType() = MSG_INPUT Then
-					Local inputCount:Int
-					If event.Channel() = GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced And DecodeInputBatch(event.Payload(), inputSequences, inputXs, inputYs, inputCount) Then
-						For Local inputIndex:Int = 0 Until inputCount
-							Select players[index].receiveSequencer.Process(inputSequences[inputIndex])
-								Case EPredictionSequenceResult.Accepted
-									Local payloadLength:Size_T = EncodeMovementInput(Byte Ptr(sendBuffer), Size_T(sendBuffer.Length), inputXs[inputIndex], inputYs[inputIndex])
-									If Not players[index].inputQueue.Add(inputSequences[inputIndex], Byte Ptr(sendBuffer), payloadLength) Then Exit
-								Case EPredictionSequenceResult.Gap
-									Exit
-							End Select
-						Next
-					End If
+				If index >= 0 And players[index].active And event.MessageType() = MSG_INPUT And event.Channel() = GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced Then
+					If Not authoritative.ReceiveInputs(index, event.Peer(), event.Payload()) Then Print "Rejected input packet from player " + (index + 1)
 				End If
 
 			Case ESessionEventKind.Left
 				Local index:Int = PlayerIndexForPeer(event.Peer())
 				If index >= 0 Then
 					If players[index].active Then AnnounceLeftPlayer(index)
+					authoritative.UnbindPlayer(index)
 					players[index] = New SServerPlayer
 					Print "Player " + (index + 1) + " left"
 				End If
@@ -176,19 +166,18 @@ While session.IsOpen()
 		accumulator :- AUTHORITATIVE_SIMULATION_STEP
 		serverTick :+ 1
 		For Local index:Int = 0 Until players.Length
-			If Not players[index].active Or Not players[index].inputQueue Then Continue
+			If Not players[index].active Then Continue
 			If Not players[index].inputStarted Then
-				If players[index].inputQueue.Count() < AUTHORITATIVE_SERVER_INPUT_DELAY Then Continue
+				If authoritative.InputCount(index) < AUTHORITATIVE_SERVER_INPUT_DELAY Then Continue
 				players[index].inputStarted = True
 			End If
 			Local input:SPredictionInput
-			If players[index].inputQueue.Get(0, input) Then
+			If authoritative.PeekInput(index, input) Then
 				Local inputX:Int
 				Local inputY:Int
 				If DecodeMovementInput(input.Payload(), inputX, inputY) Then
 					ApplyInput(players[index].x, players[index].y, inputX, inputY)
-					players[index].lastProcessedInput = input.Sequence()
-					players[index].inputQueue.Acknowledge(input.Sequence())
+					authoritative.AcknowledgeInput(index, input.Sequence())
 				End If
 			End If
 		Next

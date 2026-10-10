@@ -5,13 +5,10 @@ Import BRL.PolledInput
 Import Max2D.VirtualJoystick
 Import GameNet.Session
 Import GameNet.ENet
-Import GameNet.Snapshot
-Import GameNet.Prediction
+Import GameNet.AuthoritativeSession
 
 Include "protocol.bmx"
 
-Const SNAPSHOT_BUFFER_SIZE:Int = 32
-Const SNAPSHOT_STATE_SIZE:Size_T = 8
 Const SERVER_TICKS_PER_SECOND:Double = 60.0
 Const SNAPSHOT_BASE_DELAY_TICKS:Float = 2.0
 Const SNAPSHOT_MAXIMUM_DELAY_TICKS:Float = 12.0
@@ -30,7 +27,6 @@ Struct SClientPlayer
 	Field initialized:Int
 End Struct
 
-Global snapshotStateBuffer:Byte[SNAPSHOT_STATE_SIZE]
 Global predictionInputBuffer:Byte[AUTHORITATIVE_INPUT_PAYLOAD_SIZE]
 
 Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int, seconds:Float)
@@ -48,22 +44,9 @@ Function ApplyInput(x:Float Var, y:Float Var, inputX:Int, inputY:Int, seconds:Fl
 	y = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, y))
 End Function
 
-Function StorePositionSnapshot:Int(timeline:TSnapshotTimeline, tick:UInt, x:Float, y:Float)
-	Local writer:SPacketWriter = New SPacketWriter(Byte Ptr(snapshotStateBuffer), Size_T(snapshotStateBuffer.Length))
-	writer.WriteFloat32(x)
-	writer.WriteFloat32(y)
-	If writer.Failed() Then Return False
-	Return timeline.Add(tick, Byte Ptr(snapshotStateBuffer), writer.Position())
-End Function
-
-Function DecodePositionState:Int(state:SPacketView, x:Float Var, y:Float Var)
-	Local reader:SPacketReader = New SPacketReader(state)
-	Return reader.ReadFloat32(x) And reader.ReadFloat32(y) And reader.Remaining() = 0
-End Function
-
-Function SamplePositionSnapshot:Int(timeline:TSnapshotTimeline, renderTick:Double, x:Float Var, y:Float Var)
+Function SamplePositionSnapshot:Int(authoritative:TAuthoritativeClientSession, entity:Int, renderTick:Double, x:Float Var, y:Float Var)
 	Local sample:SSnapshotSample
-	If Not timeline.Sample(renderTick, sample) Then Return False
+	If Not authoritative.SampleEntity(entity, renderTick, sample) Then Return False
 	Local fromX:Float
 	Local fromY:Float
 	If Not DecodePositionState(sample.FromState(), fromX, fromY) Then Return False
@@ -79,6 +62,38 @@ Function SamplePositionSnapshot:Int(timeline:TSnapshotTimeline, renderTick:Doubl
 	y = fromY + (toY - fromY) * sample.Blend()
 	Return True
 End Function
+
+Type TMovementPrediction Implements IAuthoritativePredictionSimulation
+	Field players:SClientPlayer[]
+	Field ownIndex:Int = -1
+
+	Method Configure(players:SClientPlayer[], ownIndex:Int)
+		Self.players = players
+		Self.ownIndex = ownIndex
+	End Method
+
+	Method LoadAuthoritativeState:Int(tick:UInt, state:SPacketView)
+		If ownIndex < 0 Or ownIndex >= players.Length Then Return False
+		Local x:Float
+		Local y:Float
+		If Not DecodePositionState(state, x, y) Then Return False
+		players[ownIndex].x = x
+		players[ownIndex].y = y
+		players[ownIndex].predictedX = x
+		players[ownIndex].predictedY = y
+		players[ownIndex].initialized = True
+		Return True
+	End Method
+
+	Method ReplayInput:Int(sequence:UInt, input:SPacketView)
+		If ownIndex < 0 Or ownIndex >= players.Length Then Return False
+		Local inputX:Int
+		Local inputY:Int
+		If Not DecodeMovementInput(input, inputX, inputY) Then Return False
+		ApplyInput(players[ownIndex].predictedX, players[ownIndex].predictedY, inputX, inputY, AUTHORITATIVE_SIMULATION_STEP)
+		Return True
+	End Method
+End Type
 
 Local serverAddress:String = "127.0.0.1"
 Local serverPort:Int = AUTHORITATIVE_PORT
@@ -107,17 +122,12 @@ Local hostPeer:SNetPeer
 Local status:String = "Connecting to " + serverAddress + ":" + serverPort + "..."
 Local ownEntityId:UInt
 Local players:SClientPlayer[AUTHORITATIVE_MAX_PLAYERS]
-Local snapshotTimelines:TSnapshotTimeline[AUTHORITATIVE_MAX_PLAYERS]
-For Local index:Int = 0 Until snapshotTimelines.Length
-	snapshotTimelines[index] = TSnapshotTimeline.Create(SNAPSHOT_BUFFER_SIZE, SNAPSHOT_STATE_SIZE)
-Next
-Local snapshotClock:TSnapshotClock = TSnapshotClock.Create(SERVER_TICKS_PER_SECOND)
-Local snapshotDelay:TSnapshotDelay = TSnapshotDelay.Create(SERVER_TICKS_PER_SECOND, SNAPSHOT_BASE_DELAY_TICKS, SNAPSHOT_MAXIMUM_DELAY_TICKS)
-Local inputHistory:TPredictionHistory = TPredictionHistory.Create(AUTHORITATIVE_INPUT_HISTORY_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE)
-Local inputSequence:UInt
-Local acknowledgedInput:UInt
+Local authoritativeConfig:SAuthoritativeSessionConfig = New SAuthoritativeSessionConfig(AUTHORITATIVE_MAX_PLAYERS, AUTHORITATIVE_MAX_PLAYERS, AUTHORITATIVE_INPUT_HISTORY_CAPACITY, AUTHORITATIVE_SERVER_INPUT_CAPACITY, AUTHORITATIVE_SNAPSHOT_CAPACITY, AUTHORITATIVE_INPUT_PAYLOAD_SIZE, AUTHORITATIVE_SNAPSHOT_STATE_SIZE, AUTHORITATIVE_REDUNDANT_INPUTS, SERVER_TICKS_PER_SECOND, SNAPSHOT_BASE_DELAY_TICKS, SNAPSHOT_MAXIMUM_DELAY_TICKS, MSG_INPUT, MSG_SNAPSHOT, GAMEPLAY_CHANNEL)
+Local authoritative:TAuthoritativeClientSession = TAuthoritativeClientSession.Create(authoritativeConfig)
+If Not authoritative Then Throw "Could not create the authoritative client session"
+Local movementPrediction:TMovementPrediction = New TMovementPrediction
+movementPrediction.Configure(players, -1)
 Local serverTick:UInt
-Local inputBatchBuffer:Byte[512]
 Local predictionAccumulator:Float
 Local timingWindowStart:Int = MilliSecs()
 Local framesInWindow:Int
@@ -146,13 +156,11 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 				If DecodeEntity(event.Payload(), ownEntityId) And ownEntityId >= 1 And ownEntityId <= UInt(players.Length) Then
 					For Local index:Int = 0 Until players.Length
 						players[index] = New SClientPlayer
-						snapshotTimelines[index].Clear()
 					Next
-					inputHistory.Clear()
-					inputSequence = 0
+					authoritative.Reset()
+					authoritative.SetLocalEntity(Int(ownEntityId) - 1)
+					movementPrediction.Configure(players, Int(ownEntityId) - 1)
 					predictionAccumulator = 0.0
-					snapshotClock.Clear()
-					snapshotDelay.Clear()
 					status = "Joined as player " + ownEntityId + "; waiting for spawn"
 				Else
 					status = "Joined with an invalid entity ID"
@@ -165,16 +173,12 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 				status = "Disconnected (code " + event.Code() + ")"
 				hostPeer = New SNetPeer
 				ownEntityId = 0
-				inputSequence = 0
-				acknowledgedInput = 0
-				inputHistory.Clear()
+				authoritative.Reset()
+				movementPrediction.Configure(players, -1)
 				predictionAccumulator = 0.0
 				For Local index:Int = 0 Until players.Length
 					players[index] = New SClientPlayer
-					snapshotTimelines[index].Clear()
 				Next
-				snapshotClock.Clear()
-				snapshotDelay.Clear()
 
 			Case ESessionEventKind.Message
 				Select event.MessageType()
@@ -205,47 +209,31 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 							If DecodeEntity(event.Payload(), entityId) And entityId >= 1 And entityId <= UInt(players.Length) Then
 								Local index:Int = Int(entityId) - 1
 								players[index] = New SClientPlayer
-								snapshotTimelines[index].Clear()
+								authoritative.ClearEntity(index)
 							End If
 						End If
 
 					Case MSG_SNAPSHOT
 						If event.Channel() = GAMEPLAY_CHANNEL And event.Delivery() = EDeliveryMode.UnreliableSequenced Then
-							Local entityId:UInt
-							Local tick:UInt
-							Local acknowledged:UInt
-							Local x:Float
-							Local y:Float
-							If DecodeSnapshot(event.Payload(), entityId, tick, acknowledged, x, y) And entityId >= 1 And entityId <= UInt(players.Length) Then
-								Local index:Int = Int(entityId) - 1
+							Local snapshot:SAuthoritativeSnapshot
+							If authoritative.ReceiveSnapshot(event.Payload(), frameNow, snapshot) Then
+								Local index:Int = snapshot.Entity()
+								Local x:Float
+								Local y:Float
+								If Not DecodePositionState(snapshot.State(), x, y) Then Continue
 								players[index].active = True
 								players[index].x = x
 								players[index].y = y
-								StorePositionSnapshot(snapshotTimelines[index], tick, x, y)
-								If snapshotClock.Observe(tick, frameNow) Then
-									snapshotDelay.Observe(tick, frameNow)
-								End If
-								If entityId = ownEntityId Then
-									serverTick = tick
-									acknowledgedInput = acknowledged
-									inputHistory.Acknowledge(acknowledged)
+								If index = authoritative.LocalEntity() Then
+									serverTick = snapshot.Tick()
 									Local previousRenderX:Float = players[index].renderX
 									Local previousRenderY:Float = players[index].renderY
-									Local reconciledX:Float = x
-									Local reconciledY:Float = y
-									For Local historyIndex:Int = 0 Until inputHistory.Count()
-										Local input:SPredictionInput
-										Local replayX:Int
-										Local replayY:Int
-										If inputHistory.Get(historyIndex, input) And DecodeMovementInput(input.Payload(), replayX, replayY) Then
-											ApplyInput(reconciledX, reconciledY, replayX, replayY, AUTHORITATIVE_SIMULATION_STEP)
-										End If
-									Next
-									players[index].predictedX = reconciledX
-									players[index].predictedY = reconciledY
-									players[index].correctionX = previousRenderX - reconciledX
-									players[index].correctionY = previousRenderY - reconciledY
-									players[index].initialized = True
+									If authoritative.Reconcile(snapshot, movementPrediction) Then
+										players[index].correctionX = previousRenderX - players[index].predictedX
+										players[index].correctionY = previousRenderY - players[index].predictedY
+									Else
+										status = "Prediction reconciliation failed"
+									End If
 									snapshotsInWindow :+ 1
 									If lastSnapshotTime > 0 Then largestSnapshotGap = Max(largestSnapshotGap, frameNow - lastSnapshotTime)
 									lastSnapshotTime = frameNow
@@ -290,14 +278,12 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		Local addedInput:Int
 		While predictionAccumulator >= AUTHORITATIVE_SIMULATION_STEP
 			predictionAccumulator :- AUTHORITATIVE_SIMULATION_STEP
-			Local nextSequence:UInt = inputSequence + 1
 			Local inputLength:Size_T = EncodeMovementInput(Byte Ptr(predictionInputBuffer), Size_T(predictionInputBuffer.Length), currentInputX, currentInputY)
-			If Not inputHistory.Add(nextSequence, Byte Ptr(predictionInputBuffer), inputLength) Then
+			If authoritative.QueueInput(Byte Ptr(predictionInputBuffer), inputLength) = 0 Then
 				status = "Prediction input history full"
 				predictionAccumulator = 0.0
 				Exit
 			End If
-			inputSequence = nextSequence
 			addedInput = True
 			ApplyInput(players[ownIndex].predictedX, players[ownIndex].predictedY, currentInputX, currentInputY, AUTHORITATIVE_SIMULATION_STEP)
 		Wend
@@ -307,18 +293,17 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 		players[ownIndex].renderX = Max(PLAYER_RADIUS, Min(WORLD_WIDTH - PLAYER_RADIUS, players[ownIndex].predictedX + players[ownIndex].correctionX))
 		players[ownIndex].renderY = Max(PLAYER_RADIUS, Min(WORLD_HEIGHT - PLAYER_RADIUS, players[ownIndex].predictedY + players[ownIndex].correctionY))
 		If addedInput And hostPeer.IsValid() Then
-			Local length:Size_T = EncodeInputBatch(Byte Ptr(inputBatchBuffer), Size_T(inputBatchBuffer.Length), inputHistory)
-			If length > 0 Then session.Send(hostPeer, MSG_INPUT, GAMEPLAY_CHANNEL, EDeliveryMode.UnreliableSequenced, Byte Ptr(inputBatchBuffer), length)
+			authoritative.SendInputs(session, hostPeer)
 		End If
 	Else
 		predictionAccumulator = 0.0
 	End If
 
-	If snapshotClock.IsObserved() Then
-		Local renderTick:Double = snapshotClock.Estimate(frameNow) - Double(snapshotDelay.DelayTicks())
+	Local renderTick:Double = authoritative.RenderTick(frameNow)
+	If renderTick > 0.0 Then
 		For Local index:Int = 0 Until players.Length
 			If index = ownIndex Or Not players[index].active Then Continue
-			If SamplePositionSnapshot(snapshotTimelines[index], renderTick, players[index].renderX, players[index].renderY) Then players[index].initialized = True
+			If SamplePositionSnapshot(authoritative, index, renderTick, players[index].renderX, players[index].renderY) Then players[index].initialized = True
 		Next
 	End If
 
@@ -345,10 +330,10 @@ While Not KeyDown(KEY_ESCAPE) And Not AppTerminate()
 	SetColor 255, 255, 255
 	DrawText status, 12, 12
 	DrawText "Server-authoritative positions", 12, 32
-	DrawText "Input " + inputSequence + "  acknowledged " + acknowledgedInput + "  server tick " + serverTick, 12, 52
+	DrawText "Input " + (authoritative.NextInputSequence() - 1) + "  acknowledged " + authoritative.AcknowledgedInput() + "  server tick " + serverTick, 12, 52
 	DrawText "FPS " + displayedFramesPerSecond + "  snapshots/s " + displayedSnapshotsPerSecond, 12, 72
 	DrawText "Largest frame gap " + frameGap + " ms  snapshot gap " + snapshotGap + " ms", 12, 92
-	DrawText "Snapshot buffer " + Int(snapshotDelay.DelayMillis()) + " ms", 12, 112
+	DrawText "Snapshot buffer " + Int(authoritative.DelayMillis()) + " ms", 12, 112
 	DrawText "WASD / arrows / on-screen stick", 12, 132
 	controls.Render()
 	Flip 1

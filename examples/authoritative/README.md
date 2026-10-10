@@ -4,11 +4,14 @@ This example deliberately separates game authority from presentation:
 
 - `server.bmx` is a headless ENet host. It owns the simulation and the players'
   positions, with room for four clients.
-- `client.bmx` uses `GameNet.Prediction` to retain and replay sequenced input,
-  predicts its own movement immediately, reconciles it with the host, and uses
-  `GameNet.Snapshot` to interpolate other players from a bounded timeline.
+- Both sides use `GameNet.AuthoritativeSession` for redundant sequenced input,
+  server queues and acknowledgement, local reconciliation, snapshot timelines,
+  clock estimation, and interpolation delay.
+- `client.bmx` predicts its own movement immediately and supplies only the
+  game-specific state loading, input replay, and position interpolation.
 - `protocol.bmx` is shared wire-format code built from `GameNet.Core` packet
-  readers and writers.
+  readers and writers. It now contains only game-specific movement, position,
+  spawn, and despawn payloads; the reusable session owns its network protocol.
 
 Spawn and despawn messages use reliable ordered delivery on the control channel.
 Input and per-entity snapshots use unreliable sequenced delivery on the gameplay

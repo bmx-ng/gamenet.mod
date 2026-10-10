@@ -152,8 +152,30 @@ Check(TRollbackSession.Create(New TTestSimulation, tooManyPlayers) = Null, "reje
 
 Local plainSimulation:TPlainSimulation = New TPlainSimulation
 Local plainConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 32, 4, 1)
+Local plainMemory:SNetMemoryRequirements
+Check(TRollbackSession.MemoryRequirements(plainSimulation, plainConfig, plainMemory), "inspect rollback storage before allocation")
+Check(plainMemory.NativeBytes() = 197 And plainMemory.ManagedArrayBytes() > 0 And plainMemory.TotalPayloadBytes() > plainMemory.NativeBytes(), "report rollback native and managed storage")
+Local effectMemory:SNetMemoryRequirements
+Check(TRollbackSession.MemoryRequirements(New TTestSimulation, plainConfig, effectMemory), "inspect rollback effect storage")
+Check(effectMemory.NativeBytes() > plainMemory.NativeBytes() And effectMemory.ManagedArrayBytes() > plainMemory.ManagedArrayBytes(), "include optional effect storage")
+Local overflowConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 32, Size_T(-1), 1)
+Local overflowMemory:SNetMemoryRequirements
+Check(Not TRollbackSession.MemoryRequirements(plainSimulation, overflowConfig, overflowMemory), "reject rollback state larger than wire length")
+Local effectOverflowConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 32, 4, 1, 3, 8, 12, 30, 32, 8, Size_T(-1))
+Check(Not TRollbackSession.MemoryRequirements(New TTestSimulation, effectOverflowConfig, overflowMemory), "reject rollback storage arithmetic overflow")
+Local oversizedInputConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 32, 4, 65536)
+Check(TRollbackSession.Create(plainSimulation, oversizedInputConfig) = Null, "reject rollback input larger than wire length")
 Local plainSession:TRollbackSession = TRollbackSession.Create(plainSimulation, plainConfig)
 Local plainNeutral:Byte[1]
+Local fuzzSession:TRollbackSession = TRollbackSession.Create(New TPlainSimulation, plainConfig)
+Check(fuzzSession.Start(Byte Ptr(plainNeutral), 1), "start malformed-packet session")
+Local fuzzPacket:Byte[32]
+Local fuzzLength:Size_T = WriteSingleInputBatch(Byte Ptr(fuzzPacket), Size_T(fuzzPacket.Length), 0, 0, 1)
+For Local truncated:Int = 0 Until Int(fuzzLength)
+	Check(Not fuzzSession.ReceiveInputs(1, New SPacketView(Byte Ptr(fuzzPacket), Size_T(truncated))), "reject truncated rollback input")
+Next
+Check(fuzzSession.ReceiveInputs(1, New SPacketView(Byte Ptr(fuzzPacket), fuzzLength)), "accept complete rollback input after malformed packets")
+Check(Not fuzzSession.Failed(), "malformed rollback packets remain non-fatal")
 Check(plainSession.Start(Byte Ptr(plainNeutral), 1), "start simulation without effect source")
 Check(plainSession.Step(Byte Ptr(plainNeutral), 1), "advance simulation without effect source")
 Check(plainSession.PendingConfirmedEffects() = 0, "effect support remains optional")
@@ -203,10 +225,11 @@ Check(Not authorityRecovery.RequestStateSync(), "authority cannot request its ow
 Local simulation0:TTestSimulation = New TTestSimulation
 Local simulation1:TTestSimulation = New TTestSimulation
 simulation1.corruptFrame = 70
-Local config0:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 128, 8, 1, 3, 8, 12, 10, 16)
-Local config1:SRollbackSessionConfig = New SRollbackSessionConfig(2, 1, 128, 8, 1, 3, 8, 12, 10, 16)
+Local config0:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 128, 8, 1, 3, 8, 12, 10, 16, 8, 64, 64, 0, True)
+Local config1:SRollbackSessionConfig = New SRollbackSessionConfig(2, 1, 128, 8, 1, 3, 8, 12, 10, 16, 8, 64, 64, 0, True)
 Local session0:TRollbackSession = TRollbackSession.Create(simulation0, config0)
 Local session1:TRollbackSession = TRollbackSession.Create(simulation1, config1)
+Check(session0.StateSyncPacketCapacity() = config0.maxStateSize + 21, "64-bit state-sync packet capacity")
 Check(session0 <> Null And session1 <> Null, "create rollback sessions")
 
 Local neutral:Byte[1]

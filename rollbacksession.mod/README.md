@@ -53,6 +53,12 @@ and a full peer mesh also increases message fan-out. Larger games should
 normally use an authoritative server and snapshots rather than one shared
 rollback timeline.
 
+Call `TRollbackSession.MemoryRequirements` before construction to inspect the
+native payload buffers and managed array element storage implied by a
+configuration. The calculation rejects `Size_T` overflow and includes effect
+storage only when the supplied simulation implements
+`IRollbackEffectSimulation`; runtime object and array headers are not included.
+
 ## Step status and stalls
 
 `CanStep` remains the simple readiness check. `StepStatus` distinguishes a
@@ -97,6 +103,11 @@ its state is wrong, that state still wins. Nor can recovery retract an
 irreversible presentation effect the application has already consumed. Games
 should continue to keep deterministic state compact and use confirmed effects
 for presentation work.
+
+State verification uses the existing 32-bit hash by default. Set `useHash64`
+in every peer's configuration to exchange 64-bit FNV-1a hashes instead. This
+also protects state-sync responses with the 64-bit value and adds four bytes to
+hash and state-sync packets. All peers in a match must use the same setting.
 
 `RequestStateSync` lets a non-authority peer enter the same recovery path
 explicitly after returning from application suspension, without waiting for a

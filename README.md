@@ -47,6 +47,10 @@ networking library or platform service.
 This repository requires the current bcc2-based BlitzMax NG toolchain because
 its low-allocation API uses value Structs.
 
+See the [GameNet developer guide](NETWORKING_GUIDE.md) for choosing a session
+model, packet/MTU budgeting, capacity and memory sizing, deterministic rollback,
+mobile lifecycle recovery, and a practical testing strategy.
+
 Install the repository as `mod/gamenet.mod` in a BlitzMax NG SDK:
 
 ```sh

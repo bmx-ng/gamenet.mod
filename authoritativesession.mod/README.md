@@ -45,6 +45,12 @@ All capacities are fixed by `SAuthoritativeSessionConfig`. Normal input,
 snapshot, acknowledgement, reconciliation, and interpolation operations reuse
 preallocated storage.
 
+`TAuthoritativeClientSession.MemoryRequirements` and
+`TAuthoritativeServerSession.MemoryRequirements` expose the native payload
+buffers and managed array element storage implied by a configuration before it
+is allocated. The estimates exclude runtime object and array headers and reject
+`Size_T` arithmetic overflow.
+
 After an application suspension, `BeginRecovery` clears stale snapshot and
 clock history, temporarily refuses new prediction input, and waits for a fresh
 snapshot of the configured local entity. Existing unacknowledged inputs remain

@@ -24,6 +24,9 @@ Transport-independent building blocks for real-time multiplayer games.
   estimation, and adaptive jitter delay for real-time presentation.
 - `GameNet.Prediction` optionally retains sequenced input for authoritative
   acknowledgement, replay, and loss recovery.
+- `GameNet.AuthoritativeSession` composes bounded prediction and snapshot
+  storage into reusable client/server orchestration with redundant input,
+  acknowledgement, reconciliation, interpolation, and adaptive render delay.
 - `GameNet.Rollback` optionally stores deterministic frame state and predicted
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a

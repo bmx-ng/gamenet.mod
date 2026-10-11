@@ -12,6 +12,12 @@ Transport-independent building blocks for real-time multiplayer games.
   connections.
 - `GameNet.GameKit` adapts Apple Game Center real-time matches to the common
   transport contract on macOS and iOS.
+- `GameNet.GameKitOnline` adapts Game Center authentication and programmatic
+  automatching to `GameNet.Online`, yielding a `GameNet.GameKit` transport.
+- `GameNet.Online` defines an optional common contract for online identity,
+  lobbies, invitations, matchmaking, and handing a connected transport to a
+  game. Service adapters can target GameKit, Steam, Nakama, EOS, or future
+  providers without making them dependencies of the core networking modules.
 - `GameNet.Impairment` decorates any transport with deterministic, bounded
   latency, jitter, bandwidth, loss, duplication, and reordering simulation.
 - `GameNet.Session` adds a versioned handshake, framed application messages,

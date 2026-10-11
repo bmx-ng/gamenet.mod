@@ -1,8 +1,8 @@
 SuperStrict
 
 Framework Max2D.SDL3RenderMax2D
-Import Apple.GameKit
-Import GameNet.GameKit
+Import GameNet.GameKitOnline
+Import GameNet.Online
 Import GameNet.Session
 Import BRL.PolledInput
 Import BRL.StandardIO
@@ -12,11 +12,11 @@ Const APP_VERSION:UInt = 1
 Const MATCH_MIN_PLAYERS:Int = 2
 Const MATCH_MAX_PLAYERS:Int = 2 ' Raise both values together to test a larger fixed roster.
 
-Global statusText:String = "Starting Game Center..."
+Global statusText:String = "Starting online service..."
 Global detailText:String = ""
-Global gameCenter:TGameCenter = TGameCenter.Shared()
-Global pendingMatch:TGameCenterMatch
-Global transport:TGameKitTransport
+Global online:IOnlineService = TGameKitOnlineService.Create(GAMEKIT_MAX_REMOTE_PEERS, 2, 900)
+Global matchmakingRequest:UInt
+Global transport:INetTransport
 Global session:TNetSession
 Global remotePeers:SNetPeer[GAMEKIT_MAX_REMOTE_PEERS]
 Global joinedCount:Int
@@ -24,80 +24,52 @@ Global hostRole:Int
 Global sentCount:UInt
 Global receivedCount:UInt
 
-Function ErrorText:String(error:TGameCenterError)
-	If Not error Then Return ""
-	Return error.domain + " (" + error.code + "): " + error.message
-End Function
-
-Type TListener Implements IGameCenterListener, IGameCenterMultiplayerListener
-	Method OnGameCenterAuthenticationChanged(authenticated:Int, player:TGameCenterPlayer, error:TGameCenterError)
-		If error Then
-			statusText = "Authentication failed"
-			detailText = ErrorText(error)
-		Else If authenticated Then
-			statusText = "Authenticated as " + player.displayName
-			detailText = "Tap Find Match on both devices"
-		Else
-			statusText = "Game Center is not authenticated"
-		End If
-	End Method
-
-	Method OnGameCenterMatchFound(requestId:Int, match:TGameCenterMatch, error:TGameCenterError)
-		If error Then
-			statusText = "Matchmaking failed"
-			detailText = ErrorText(error)
-		Else
-			pendingMatch = match
-			statusText = "Match found; waiting for the other player..."
-			detailText = ""
-		End If
-	End Method
-
-	Method OnGameCenterAchievementReported(requestId:Int, identifier:String, error:TGameCenterError)
-	End Method
-
-	Method OnGameCenterAchievementsLoaded(requestId:Int, result:TGameCenterAchievementResult, error:TGameCenterError)
-	End Method
-
-	Method OnGameCenterAchievementsReset(requestId:Int, error:TGameCenterError)
-	End Method
-
-	Method OnGameCenterScoreSubmitted(requestId:Int, leaderboardIdentifier:String, score:Long, error:TGameCenterError)
-	End Method
-
-	Method OnGameCenterLeaderboardLoaded(requestId:Int, leaderboard:TGameCenterLeaderboardResult, error:TGameCenterError)
-	End Method
-
-	Method OnGameCenterViewDismissed(view:EGameCenterView)
-	End Method
-End Type
-
-Function BeginSession()
-	If Not pendingMatch Or pendingMatch.ExpectedPlayerCount() <> 0 Or pendingMatch.PlayerCount() < MATCH_MIN_PLAYERS - 1 Then Return
-	If Not gameCenter.localPlayer Then Return
-	Local hostIndex:Int = GameKitElectedHostIndex(pendingMatch, gameCenter.localPlayer)
-	If hostIndex < 0 Then Return
-	hostRole = hostIndex = 0
-	transport = TGameKitTransport.Create(pendingMatch, GAMEKIT_MAX_REMOTE_PEERS, 2, 900)
-	If Not transport Then
-		statusText = "Could not create GameKit transport"
+Function BeginSession(requestId:UInt)
+	Local info:SOnlineMatchInfo
+	If Not online.MatchInfo(requestId, info) Then
+		statusText = "Match information unavailable"
 		Return
 	End If
+	transport = online.TakeMatchTransport(requestId)
+	If Not transport Then
+		statusText = "Could not take online match transport"
+		Return
+	End If
+	hostRole = info.IsSessionHost()
 	If hostRole Then
-		session = TNetSession.CreateHost(transport, APP_ID, APP_VERSION, pendingMatch.PlayerCount(), 900)
-		statusText = "Match connected; hosting " + (pendingMatch.PlayerCount() + 1) + " players"
+		session = TNetSession.CreateHost(transport, APP_ID, APP_VERSION, info.PlayerCount() - 1, 900)
+		statusText = "Match connected; hosting " + info.PlayerCount() + " players"
 	Else
-		If Not transport.EnableOnlyPlayer(hostIndex) Then
-			statusText = "Could not select the session host"
-			transport.Close()
-			transport = Null
-			Return
-		End If
 		session = TNetSession.CreateClient(transport, APP_ID, APP_VERSION, Null, 0, 1, 900)
 		statusText = "Match connected; joining session host"
 	End If
-	detailText = "Native GameKit players: " + (pendingMatch.PlayerCount() + 1)
-	pendingMatch = Null
+	detailText = "Online players: " + info.PlayerCount()
+	matchmakingRequest = 0
+End Function
+
+Function PollOnline()
+	If Not online Then Return
+	online.Pump()
+	Local event:SOnlineEvent
+	While online.Poll(event)
+		Select event.Kind()
+			Case EOnlineEventKind.ServiceReady
+				statusText = "Authenticated as " + event.Player().DisplayName()
+				detailText = "Tap Find Match on both devices"
+			Case EOnlineEventKind.MatchmakingStarted
+				statusText = "Looking for " + MATCH_MIN_PLAYERS + "-" + MATCH_MAX_PLAYERS + " players..."
+				detailText = "Online request " + event.RequestId()
+			Case EOnlineEventKind.MatchReady
+				BeginSession(event.RequestId())
+			Case EOnlineEventKind.MatchmakingCancelled
+				matchmakingRequest = 0
+				statusText = "Matchmaking cancelled"
+			Case EOnlineEventKind.OperationFailed
+				If event.Operation() = EOnlineOperation.StartMatchmaking Then matchmakingRequest = 0
+				statusText = "Online operation failed: " + Int(event.Error())
+				detailText = event.Detail()
+		End Select
+	Wend
 End Function
 
 Function PollSession()
@@ -155,10 +127,11 @@ End Function
 Graphics 800, 480
 SetClsColor 12, 16, 24
 SetColor 235, 240, 250
-gameCenter.Start(New TListener)
+If Not online Then Throw "GameKit online service unavailable"
+If online.Open() = 0 Then Throw "Could not open GameKit online service"
 
 While Not AppTerminate()
-	BeginSession()
+	PollOnline()
 	PollSession()
 
 	Local buttonX:Float = 250
@@ -174,10 +147,12 @@ While Not AppTerminate()
 	If pressed Then
 		If joinedCount > 0 Then
 			SendPacket()
-		Else If gameCenter.IsAuthenticated() And Not pendingMatch And Not session Then
-			statusText = "Looking for " + MATCH_MIN_PLAYERS + "-" + MATCH_MAX_PLAYERS + " players..."
-			Local requestId:Int = gameCenter.FindMatch(MATCH_MIN_PLAYERS, MATCH_MAX_PLAYERS)
-			detailText = "Matchmaking request " + requestId
+		Else If online.State() = EOnlineServiceState.Ready And matchmakingRequest = 0 And Not session Then
+			Local request:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
+			request.minPlayers = MATCH_MIN_PLAYERS
+			request.maxPlayers = MATCH_MAX_PLAYERS
+			matchmakingRequest = online.StartMatchmaking(request)
+			If matchmakingRequest = 0 Then statusText = "Could not start matchmaking"
 		End If
 	End If
 
@@ -195,5 +170,4 @@ While Not AppTerminate()
 Wend
 
 If session Then session.Close()
-If pendingMatch Then pendingMatch.Disconnect()
-gameCenter.Stop()
+If online Then online.Close()

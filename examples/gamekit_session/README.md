@@ -3,7 +3,8 @@
 This Apple-only example programmatically automatches Game Center players,
 elects a deterministic GameNet session host from their scoped player
 identifiers, and exchanges reliable application messages through
-`GameNet.Session` over `GameNet.GameKit`.
+`GameNet.Session` over `GameNet.GameKit`. Matchmaking is driven through the
+backend-neutral `GameNet.Online` API and its `GameNet.GameKitOnline` provider.
 
 Before building, give `gamekit_session.settings` a bundle identifier which has Game Center enabled in App Store Connect. Sign each build with the appropriate development team. The two devices must use different authenticated Game Center players.
 

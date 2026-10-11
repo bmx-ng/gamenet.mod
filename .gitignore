@@ -74,3 +74,6 @@
 /examples/gamekit_rebound/gamekit_rebound.xcodeproj/
 /examples/gamekit_rebound/gamekitrebound.entitlements
 /examples/gamekit_rebound/main.m
+/examples/steam_session/steam_session
+/examples/steam_session/steam_appid.txt
+/examples/steam_session/libsteam_api.dylib

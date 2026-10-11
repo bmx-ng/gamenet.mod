@@ -14,6 +14,10 @@ Transport-independent building blocks for real-time multiplayer games.
   transport contract on macOS and iOS.
 - `GameNet.GameKitOnline` adapts Game Center authentication and programmatic
   automatching to `GameNet.Online`, yielding a `GameNet.GameKit` transport.
+- `GameNet.Steam` adapts Steam Networking Messages to the common transport
+  contract on desktop targets.
+- `GameNet.SteamOnline` implements online identity, searchable lobbies,
+  invitations, lobby ownership, and match startup with Steam.
 - `GameNet.Online` defines an optional common contract for online identity,
   lobbies, invitations, matchmaking, and handing a connected transport to a
   game. Service adapters can target GameKit, Steam, Nakama, EOS, or future

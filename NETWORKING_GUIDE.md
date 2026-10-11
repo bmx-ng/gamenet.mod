@@ -55,6 +55,12 @@ feature, and use its native adapter API when the game needs something outside
 the shared lobby-and-match flow. Direct ENet remains available and does not
 require `GameNet.Online`.
 
+`GameNet.SteamOnline` is the first lobby-oriented provider. It maps Steam lobby
+metadata and membership into `IOnlineLobby`, uses the lobby owner as the
+GameNet session host, and yields a `GameNet.Steam` peer transport when the
+match starts. Steam lobby discovery and Steam Networking Messages remain
+separate underneath, matching the service/transport split in GameNet.
+
 ## Plan packet sizes rather than relying on fragmentation
 
 A transport's maximum accepted packet is not necessarily a good size to send

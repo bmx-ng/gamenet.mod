@@ -33,6 +33,28 @@ the backends operationally identical: GameKit supplies Apple matchmaking and
 connectivity, while an Internet ENet game still needs a plan for discovery,
 NAT traversal, relays or dedicated servers.
 
+## Decide how players find the match
+
+Two devices do not need an online service merely because they are playing a
+networked game. Devices on the same LAN can connect directly through ENet when
+the joining player knows the host address. A game can obtain that address from
+manual entry, a QR code, a small LAN browser, or its own application-specific
+exchange. Likewise, an Internet game can connect directly to a known public or
+dedicated-server address when routing and firewall configuration permit it.
+
+Online services solve the surrounding coordination problem. GameKit, Steam,
+Nakama, EOS, and similar systems can provide some combination of identity,
+invitations, lobby search, matchmaking, NAT traversal, relay traffic, or server
+allocation. `GameNet.Online` provides an optional common contract for that
+stage. A successful provider operation hands the game an `INetTransport`, after
+which the ordinary GameNet session and simulation layers take over.
+
+The interface is capability-based because providers are not interchangeable in
+every respect. Check a provider's advertised capabilities before displaying a
+feature, and use its native adapter API when the game needs something outside
+the shared lobby-and-match flow. Direct ENet remains available and does not
+require `GameNet.Online`.
+
 ## Plan packet sizes rather than relying on fragmentation
 
 A transport's maximum accepted packet is not necessarily a good size to send

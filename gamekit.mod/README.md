@@ -2,7 +2,14 @@
 
 `GameNet.GameKit` adapts an `Apple.GameKit` real-time `TGameCenterMatch` to the common `INetTransport` contract. It is available on macOS and iOS.
 
-Game Center matchmaking remains in `Apple.GameKit`. When its multiplayer listener supplies a match, create the transport and place `GameNet.Session` above it:
+Applications can import `GameNet.GameKitOnline` and use
+`TGameKitOnlineService` through the optional `GameNet.Online` interface for
+programmatic automatching. A `MatchReady` event then supplies the transport
+through `TakeMatchTransport`.
+
+The lower-level route remains available. When the `Apple.GameKit` multiplayer
+listener supplies a match, create the transport and place `GameNet.Session`
+above it:
 
 ```blitzmax
 Method OnGameCenterMatchFound(requestId:Int, match:TGameCenterMatch, error:TGameCenterError)

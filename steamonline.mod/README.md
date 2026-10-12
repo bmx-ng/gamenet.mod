@@ -23,3 +23,7 @@ have also requested `StartMatch` then receive their own `MatchReady` event.
 The provider initializes Steam callback processing in manual mode and pumps it
 from `Pump`. It does not shut down the process-wide Steam API when closed,
 because other Steam features may still be in use by the application.
+
+The provider's Steam operations are isolated behind `ISteamOnlineBackend`.
+Normal applications use `TSteamOnlineService.Create`; `CreateForBackend` exists
+for deterministic service tests and specialised embedding.

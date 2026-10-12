@@ -13,10 +13,11 @@ Module GameNet.SteamOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
+ModuleInfo "History: 0.2 Added a testable Steam backend boundary and provider flow tests"
 ModuleInfo "History: 0.1 Initial Steam lobby provider"
 
 ?Not android And Not ios
@@ -30,6 +31,158 @@ Const STEAM_ONLINE_NAME_KEY:String = "gamenet.name"
 Const STEAM_ONLINE_START_KEY:String = "gamenet.start"
 Const STEAM_ONLINE_JOINABLE_KEY:String = "gamenet.joinable"
 
+Rem
+bbdoc: Steam operations consumed by #TSteamOnlineService.
+about: Applications normally use the built-in implementation. The interface is
+public so provider behaviour can be tested without a running Steam client.
+End Rem
+Interface ISteamOnlineBackend
+	Method Initialize:Int()
+	Method Pump()
+	Method SetListener(listener:ISteamMatchmakingListener)
+	Method LocalSteamId:ULong()
+	Method PersonaName:String(steamId:ULong, local:Int)
+	Method LaunchCommandLine:String()
+	Method CreateLobby(lobbyType:ELobbyType, maximumPlayers:Int)
+	Method AddStringFilter(key:String, value:String)
+	Method AddSlotsFilter(openSlots:Int)
+	Method AddResultCountFilter(maximumResults:Int)
+	Method RequestLobbyList()
+	Method LobbyByIndex:ULong(index:Int)
+	Method LobbyData:String(lobbyId:ULong, key:String)
+	Method LobbyDataCount:Int(lobbyId:ULong)
+	Method LobbyDataByIndex:Int(lobbyId:ULong, index:Int, key:String Var, value:String Var)
+	Method SetLobbyData:Int(lobbyId:ULong, key:String, value:String)
+	Method LobbyOwner:ULong(lobbyId:ULong)
+	Method LobbyMemberLimit:Int(lobbyId:ULong)
+	Method LobbyMemberCount:Int(lobbyId:ULong)
+	Method LobbyMember:ULong(lobbyId:ULong, index:Int)
+	Method SetLobbyJoinable:Int(lobbyId:ULong, joinable:Int)
+	Method InviteUser:Int(lobbyId:ULong, steamId:ULong)
+	Method JoinLobby(lobbyId:ULong)
+	Method LeaveLobby(lobbyId:ULong)
+	Method ShowInviteDialog(lobbyId:ULong)
+	Method CreateTransport:INetTransport(steamIds:ULong[], channelCount:Int, maxPacketSize:Size_T)
+End Interface
+
+Private
+
+Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
+	Field client:TSteamClient
+	Field user:TSteamUser
+	Field apps:TSteamApps
+	Field friends:TSteamFriends
+	Field matchmaking:TSteamMatchmaking
+
+	Method Initialize:Int()
+		If Not SteamInit(False) Then Return False
+		SteamSetAutoRunCallbacks(False)
+		client = New TSteamClient
+		user = client.GetISteamUser()
+		apps = client.GetISteamApps()
+		friends = client.GetISteamFriends()
+		matchmaking = client.GetISteamMatchmaking()
+		Return user And apps And friends And matchmaking And user.BLoggedOn()
+	End Method
+
+	Method Pump()
+		SteamRunCallbacks()
+	End Method
+	Method SetListener(listener:ISteamMatchmakingListener)
+		If matchmaking Then matchmaking.SetListener(listener)
+	End Method
+	Method LocalSteamId:ULong()
+		Return user.GetSteamID()
+	End Method
+	Method PersonaName:String(steamId:ULong, local:Int)
+		If local Then Return friends.GetPersonaName()
+		Return friends.GetFriendPersonaName(steamId)
+	End Method
+	Method LaunchCommandLine:String()
+		Return apps.GetLaunchCommandLine()
+	End Method
+
+	Method CreateLobby(lobbyType:ELobbyType, maximumPlayers:Int)
+		matchmaking.CreateLobby(lobbyType, maximumPlayers)
+	End Method
+
+	Method AddStringFilter(key:String, value:String)
+		matchmaking.AddRequestLobbyListStringFilter(key, value)
+	End Method
+
+	Method AddSlotsFilter(openSlots:Int)
+		matchmaking.AddRequestLobbyListFilterSlotsAvailable(openSlots)
+	End Method
+
+	Method AddResultCountFilter(maximumResults:Int)
+		matchmaking.AddRequestLobbyListResultCountFilter(maximumResults)
+	End Method
+
+	Method RequestLobbyList()
+		matchmaking.RequestLobbyList()
+	End Method
+
+	Method LobbyByIndex:ULong(index:Int)
+		Return matchmaking.GetLobbyByIndex(index)
+	End Method
+
+	Method LobbyData:String(lobbyId:ULong, key:String)
+		Return matchmaking.GetLobbyData(lobbyId, key)
+	End Method
+
+	Method LobbyDataCount:Int(lobbyId:ULong)
+		Return matchmaking.GetLobbyDataCount(lobbyId)
+	End Method
+
+	Method LobbyDataByIndex:Int(lobbyId:ULong, index:Int, key:String Var, value:String Var)
+		Return matchmaking.GetLobbyDataByIndex(lobbyId, index, key, value)
+	End Method
+
+	Method SetLobbyData:Int(lobbyId:ULong, key:String, value:String)
+		Return matchmaking.SetLobbyData(lobbyId, key, value)
+	End Method
+
+	Method LobbyOwner:ULong(lobbyId:ULong)
+		Return matchmaking.GetLobbyOwner(lobbyId)
+	End Method
+
+	Method LobbyMemberLimit:Int(lobbyId:ULong)
+		Return matchmaking.GetLobbyMemberLimit(lobbyId)
+	End Method
+
+	Method LobbyMemberCount:Int(lobbyId:ULong)
+		Return matchmaking.GetNumLobbyMembers(lobbyId)
+	End Method
+
+	Method LobbyMember:ULong(lobbyId:ULong, index:Int)
+		Return matchmaking.GetLobbyMemberByIndex(lobbyId, index)
+	End Method
+
+	Method SetLobbyJoinable:Int(lobbyId:ULong, joinable:Int)
+		Return matchmaking.SetLobbyJoinable(lobbyId, joinable)
+	End Method
+
+	Method InviteUser:Int(lobbyId:ULong, steamId:ULong)
+		Return matchmaking.InviteUserToLobby(lobbyId, steamId)
+	End Method
+
+	Method JoinLobby(lobbyId:ULong)
+		matchmaking.JoinLobby(lobbyId)
+	End Method
+
+	Method LeaveLobby(lobbyId:ULong)
+		matchmaking.LeaveLobby(lobbyId)
+	End Method
+	Method ShowInviteDialog(lobbyId:ULong)
+		If friends Then friends.ActivateGameOverlayInviteDialog(lobbyId)
+	End Method
+	Method CreateTransport:INetTransport(steamIds:ULong[], channelCount:Int, maxPacketSize:Size_T)
+		Return TSteamTransport.Create(steamIds, channelCount, maxPacketSize)
+	End Method
+End Type
+
+Public
+
 Type TSteamOnlineLobby Implements IOnlineLobby
 	Field lobbyId:String
 	Field lobbyName:String
@@ -39,17 +192,36 @@ Type TSteamOnlineLobby Implements IOnlineLobby
 	Field members:SOnlinePlayer[] = New SOnlinePlayer[0]
 	Field metadata:TOnlineProperties = New TOnlineProperties
 
-	Method Id:String() Override Return lobbyId End Method
-	Method Name:String() Override Return lobbyName End Method
-	Method Owner:SOnlinePlayer() Override Return lobbyOwner End Method
-	Method MaxPlayers:Int() Override Return maximumPlayers End Method
-	Method IsJoinable:Int() Override Return joinable End Method
-	Method MemberCount:Int() Override Return members.Length End Method
+	Method Id:String() Override
+		Return lobbyId
+	End Method
+
+	Method Name:String() Override
+		Return lobbyName
+	End Method
+
+	Method Owner:SOnlinePlayer() Override
+		Return lobbyOwner
+	End Method
+
+	Method MaxPlayers:Int() Override
+		Return maximumPlayers
+	End Method
+
+	Method IsJoinable:Int() Override
+		Return joinable
+	End Method
+
+	Method MemberCount:Int() Override
+		Return members.Length
+	End Method
 	Method Member:SOnlinePlayer(index:Int) Override
 		If index < 0 Or index >= members.Length Then Return New SOnlinePlayer
 		Return members[index]
 	End Method
-	Method Properties:TOnlineProperties() Override Return metadata End Method
+	Method Properties:TOnlineProperties() Override
+		Return metadata
+	End Method
 End Type
 
 Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
@@ -57,11 +229,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	Field _state:EOnlineServiceState
 	Field _nextRequestId:UInt = 1
 	Field _openRequestId:UInt
-	Field _client:TSteamClient
-	Field _user:TSteamUser
-	Field _apps:TSteamApps
-	Field _friends:TSteamFriends
-	Field _matchmaking:TSteamMatchmaking
+	Field _backend:ISteamOnlineBackend
 	Field _localSteamId:ULong
 	Field _events:SOnlineEvent[] = New SOnlineEvent[STEAM_ONLINE_EVENT_CAPACITY]
 	Field _eventRead:Int
@@ -79,12 +247,13 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	Field _currentLobby:IOnlineLobby
 	Field _startRequestId:UInt
 	Field _readyRequestId:UInt
-	Field _readyTransport:TSteamTransport
+	Field _readyTransport:INetTransport
 	Field _readyMatchInfo:SOnlineMatchInfo
 	Field _channelCount:Int
 	Field _maxPacketSize:Size_T
 
-	Method New(channelCount:Int, maxPacketSize:Size_T)
+	Method New(backend:ISteamOnlineBackend, channelCount:Int, maxPacketSize:Size_T)
+		_backend = backend
 		_channelCount = channelCount
 		_maxPacketSize = maxPacketSize
 	End Method
@@ -124,31 +293,29 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 
 	Method SteamPlayer:SOnlinePlayer(steamId:ULong, local:Int = False)
 		If steamId = 0 Then Return New SOnlinePlayer
-		Local name:String
-		If local Then name = _friends.GetPersonaName() Else name = _friends.GetFriendPersonaName(steamId)
-		Return New SOnlinePlayer(String(steamId), name, local)
+		Return New SOnlinePlayer(String(steamId), _backend.PersonaName(steamId, local), local)
 	End Method
 
 	Method SnapshotLobby:TSteamOnlineLobby(lobbyId:ULong)
 		If lobbyId = 0 Then Return Null
 		Local result:TSteamOnlineLobby = New TSteamOnlineLobby
 		result.lobbyId = String(lobbyId)
-		result.lobbyName = _matchmaking.GetLobbyData(lobbyId, STEAM_ONLINE_NAME_KEY)
-		result.maximumPlayers = _matchmaking.GetLobbyMemberLimit(lobbyId)
-		result.joinable = _matchmaking.GetLobbyData(lobbyId, STEAM_ONLINE_JOINABLE_KEY) <> "0"
-		Local ownerId:ULong = _matchmaking.GetLobbyOwner(lobbyId)
+		result.lobbyName = _backend.LobbyData(lobbyId, STEAM_ONLINE_NAME_KEY)
+		result.maximumPlayers = _backend.LobbyMemberLimit(lobbyId)
+		result.joinable = _backend.LobbyData(lobbyId, STEAM_ONLINE_JOINABLE_KEY) <> "0"
+		Local ownerId:ULong = _backend.LobbyOwner(lobbyId)
 		result.lobbyOwner = SteamPlayer(ownerId, ownerId = _localSteamId)
-		Local count:Int = _matchmaking.GetNumLobbyMembers(lobbyId)
+		Local count:Int = _backend.LobbyMemberCount(lobbyId)
 		result.members = New SOnlinePlayer[count]
 		For Local index:Int = 0 Until count
-			Local memberId:ULong = _matchmaking.GetLobbyMemberByIndex(lobbyId, index)
+			Local memberId:ULong = _backend.LobbyMember(lobbyId, index)
 			result.members[index] = SteamPlayer(memberId, memberId = _localSteamId)
 		Next
-		Local propertyCount:Int = _matchmaking.GetLobbyDataCount(lobbyId)
+		Local propertyCount:Int = _backend.LobbyDataCount(lobbyId)
 		For Local index:Int = 0 Until propertyCount
 			Local key:String
 			Local value:String
-			If _matchmaking.GetLobbyDataByIndex(lobbyId, index, key, value) Then result.metadata.Set(key, value)
+			If _backend.LobbyDataByIndex(lobbyId, index, key, value) Then result.metadata.Set(key, value)
 		Next
 		Return result
 	End Method
@@ -159,8 +326,8 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 
 	Method PrepareMatch(requestId:UInt)
 		If requestId = 0 Or _currentLobbyId = 0 Or _readyTransport Then Return
-		Local ownerId:ULong = _matchmaking.GetLobbyOwner(_currentLobbyId)
-		Local memberCount:Int = _matchmaking.GetNumLobbyMembers(_currentLobbyId)
+		Local ownerId:ULong = _backend.LobbyOwner(_currentLobbyId)
+		Local memberCount:Int = _backend.LobbyMemberCount(_currentLobbyId)
 		If ownerId = 0 Or memberCount < 2 Then Return
 		Local host:Int = ownerId = _localSteamId
 		Local remoteIds:ULong[]
@@ -168,7 +335,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 			remoteIds = New ULong[memberCount - 1]
 			Local remoteIndex:Int
 			For Local index:Int = 0 Until memberCount
-				Local memberId:ULong = _matchmaking.GetLobbyMemberByIndex(_currentLobbyId, index)
+				Local memberId:ULong = _backend.LobbyMember(_currentLobbyId, index)
 				If memberId <> _localSteamId Then
 					remoteIds[remoteIndex] = memberId
 					remoteIndex :+ 1
@@ -177,7 +344,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		Else
 			remoteIds = [ownerId]
 		End If
-		_readyTransport = TSteamTransport.Create(remoteIds, _channelCount, _maxPacketSize)
+		_readyTransport = _backend.CreateTransport(remoteIds, _channelCount, _maxPacketSize)
 		If Not _readyTransport Then
 			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.StartMatch, requestId, EOnlineError.ProviderFailure, 0, String(_currentLobbyId), New SOnlinePlayer, "Could not create Steam transport"))
 			_startRequestId = 0
@@ -194,46 +361,55 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	Public
 	Function Create:TSteamOnlineService(channelCount:Int = 4, maxPacketSize:Size_T = STEAM_DEFAULT_MAX_PACKET_SIZE)
 		If channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Then Return Null
-		Return New TSteamOnlineService(channelCount, maxPacketSize)
+		Return New TSteamOnlineService(New TNativeSteamOnlineBackend, channelCount, maxPacketSize)
 	End Function
 
-	Method ProviderName:String() Override Return "Steam" End Method
-	Method Capabilities:EOnlineCapability() Override Return EOnlineCapability.CreateLobby | EOnlineCapability.FindLobbies | EOnlineCapability.Invitations | EOnlineCapability.MatchTransport End Method
-	Method State:EOnlineServiceState() Override Return _state End Method
-	Method LocalPlayer:SOnlinePlayer() Override Return SteamPlayer(_localSteamId, True) End Method
+	Rem
+	bbdoc: Creates a Steam online service using a supplied backend.
+	about: This is primarily useful for deterministic provider tests.
+	End Rem
+	Function CreateForBackend:TSteamOnlineService(backend:ISteamOnlineBackend, channelCount:Int = 4, maxPacketSize:Size_T = STEAM_DEFAULT_MAX_PACKET_SIZE)
+		If Not backend Or channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Then Return Null
+		Return New TSteamOnlineService(backend, channelCount, maxPacketSize)
+	End Function
+
+	Method ProviderName:String() Override
+		Return "Steam"
+	End Method
+
+	Method Capabilities:EOnlineCapability() Override
+		Return EOnlineCapability.CreateLobby | EOnlineCapability.FindLobbies | EOnlineCapability.Invitations | EOnlineCapability.MatchTransport
+	End Method
+
+	Method State:EOnlineServiceState() Override
+		Return _state
+	End Method
+	Method LocalPlayer:SOnlinePlayer() Override
+		If _state <> EOnlineServiceState.Ready Or _localSteamId = 0 Then Return New SOnlinePlayer
+		Return SteamPlayer(_localSteamId, True)
+	End Method
 
 	Method Open:UInt() Override
 		If _state <> EOnlineServiceState.Closed Then Return 0
 		_openRequestId = NextRequestId()
 		_state = EOnlineServiceState.Opening
-		If Not SteamInit(False) Then
+		If Not _backend.Initialize() Then
 			_state = EOnlineServiceState.Failed
 			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.Open, _openRequestId, EOnlineError.Authentication, 0, "", New SOnlinePlayer, "Steam is not running or the application is unavailable"))
 			Return _openRequestId
 		End If
-		SteamSetAutoRunCallbacks(False)
-		_client = New TSteamClient
-		_user = _client.GetISteamUser()
-		_apps = _client.GetISteamApps()
-		_friends = _client.GetISteamFriends()
-		_matchmaking = _client.GetISteamMatchmaking()
-		If Not _user Or Not _apps Or Not _friends Or Not _matchmaking Or Not _user.BLoggedOn() Then
-			_state = EOnlineServiceState.Failed
-			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.Open, _openRequestId, EOnlineError.Authentication, 0, "", New SOnlinePlayer, "Steam user is not logged on"))
-			Return _openRequestId
-		End If
-		_matchmaking.SetListener(Self)
-		_localSteamId = _user.GetSteamID()
+		_backend.SetListener(Self)
+		_localSteamId = _backend.LocalSteamId()
 		_state = EOnlineServiceState.Ready
 		Queue(New SOnlineEvent(EOnlineEventKind.ServiceReady, EOnlineOperation.Open, _openRequestId, EOnlineError.None, 0, "", SteamPlayer(_localSteamId, True), ""))
-		Local launchedLobbyId:ULong = LaunchLobbyId(_apps.GetLaunchCommandLine())
+		Local launchedLobbyId:ULong = LaunchLobbyId(_backend.LaunchCommandLine())
 		If launchedLobbyId Then Queue(New SOnlineEvent(EOnlineEventKind.InvitationReceived, EOnlineOperation.None, 0, EOnlineError.None, 0, String(launchedLobbyId), New SOnlinePlayer, "Steam launch invitation accepted"))
 		Return _openRequestId
 	End Method
 
 	Method Pump() Override
-		If _state <> EOnlineServiceState.Closed Then SteamRunCallbacks()
-		If _startRequestId And _currentLobbyId And _matchmaking.GetLobbyOwner(_currentLobbyId) <> _localSteamId And _matchmaking.GetLobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY) = "1" Then PrepareMatch(_startRequestId)
+		If _state <> EOnlineServiceState.Closed Then _backend.Pump()
+		If _startRequestId And _currentLobbyId And _backend.LobbyOwner(_currentLobbyId) <> _localSteamId And _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY) = "1" Then PrepareMatch(_startRequestId)
 	End Method
 
 	Method Poll:Int(event:SOnlineEvent Var) Override
@@ -254,7 +430,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 			Case EOnlineLobbyVisibility.FriendsOnly lobbyType = ELobbyType.k_ELobbyTypeFriendsOnly
 			Case EOnlineLobbyVisibility.Public lobbyType = ELobbyType.k_ELobbyTypePublic
 		End Select
-		_matchmaking.CreateLobby(lobbyType, options.maxPlayers)
+		_backend.CreateLobby(lobbyType, options.maxPlayers)
 		Return _createRequestId
 	End Method
 
@@ -262,11 +438,11 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		If _state <> EOnlineServiceState.Ready Or Not query Or _findRequestId Then Return 0
 		_findRequestId = NextRequestId()
 		For Local index:Int = 0 Until query.properties.Count()
-			_matchmaking.AddRequestLobbyListStringFilter(query.properties.KeyAt(index), query.properties.ValueAt(index))
+			_backend.AddStringFilter(query.properties.KeyAt(index), query.properties.ValueAt(index))
 		Next
-		If query.requiredOpenSlots > 0 Then _matchmaking.AddRequestLobbyListFilterSlotsAvailable(query.requiredOpenSlots)
-		_matchmaking.AddRequestLobbyListResultCountFilter(query.maximumResults)
-		_matchmaking.RequestLobbyList()
+		If query.requiredOpenSlots > 0 Then _backend.AddSlotsFilter(query.requiredOpenSlots)
+		_backend.AddResultCountFilter(query.maximumResults)
+		_backend.RequestLobbyList()
 		Return _findRequestId
 	End Method
 
@@ -288,8 +464,8 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	bbdoc: Opens Steam's friend invitation overlay for the current lobby.
 	End Rem
 	Method ShowInviteDialog:Int()
-		If _state <> EOnlineServiceState.Ready Or _currentLobbyId = 0 Or Not _friends Then Return False
-		_friends.ActivateGameOverlayInviteDialog(_currentLobbyId)
+		If _state <> EOnlineServiceState.Ready Or _currentLobbyId = 0 Then Return False
+		_backend.ShowInviteDialog(_currentLobbyId)
 		Return True
 	End Method
 
@@ -300,7 +476,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		If _state <> EOnlineServiceState.Ready Or _currentLobbyId = 0 Then Return False
 		Local steamId:ULong = playerId.ToULong()
 		If steamId = 0 Then Return False
-		Return _matchmaking.InviteUserToLobby(_currentLobbyId, steamId)
+		Return _backend.InviteUser(_currentLobbyId, steamId)
 	End Method
 
 	Method JoinLobby:UInt(lobbyId:String) Override
@@ -308,7 +484,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		Local nativeId:ULong = lobbyId.ToULong()
 		If nativeId = 0 Then Return 0
 		_joinRequestId = NextRequestId()
-		_matchmaking.JoinLobby(nativeId)
+		_backend.JoinLobby(nativeId)
 		Return _joinRequestId
 	End Method
 
@@ -316,7 +492,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		If _currentLobbyId = 0 Then Return 0
 		Local requestId:UInt = NextRequestId()
 		Local subject:String = String(_currentLobbyId)
-		_matchmaking.LeaveLobby(_currentLobbyId)
+		_backend.LeaveLobby(_currentLobbyId)
 		_currentLobbyId = 0
 		_currentLobby = Null
 		Queue(New SOnlineEvent(EOnlineEventKind.LobbyLeft, EOnlineOperation.LeaveLobby, requestId, EOnlineError.None, 0, subject, New SOnlinePlayer, ""))
@@ -339,12 +515,12 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		If _currentLobbyId = 0 Or _startRequestId Or _readyTransport Then Return 0
 		Local requestId:UInt = NextRequestId()
 		_startRequestId = requestId
-		If _matchmaking.GetLobbyOwner(_currentLobbyId) = _localSteamId Then
-			_matchmaking.SetLobbyJoinable(_currentLobbyId, False)
-			_matchmaking.SetLobbyData(_currentLobbyId, STEAM_ONLINE_JOINABLE_KEY, "0")
-			_matchmaking.SetLobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY, "1")
+		If _backend.LobbyOwner(_currentLobbyId) = _localSteamId Then
+			_backend.SetLobbyJoinable(_currentLobbyId, False)
+			_backend.SetLobbyData(_currentLobbyId, STEAM_ONLINE_JOINABLE_KEY, "0")
+			_backend.SetLobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY, "1")
 			PrepareMatch(_startRequestId)
-		Else If _matchmaking.GetLobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY) = "1" Then
+		Else If _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY) = "1" Then
 			PrepareMatch(_startRequestId)
 		End If
 		Return requestId
@@ -370,8 +546,8 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		Local requestId:UInt = NextRequestId()
 		_state = EOnlineServiceState.Closing
 		If _readyTransport Then _readyTransport.Close()
-		If _currentLobbyId Then _matchmaking.LeaveLobby(_currentLobbyId)
-		If _matchmaking Then _matchmaking.SetListener(Null)
+		If _currentLobbyId Then _backend.LeaveLobby(_currentLobbyId)
+		_backend.SetListener(Null)
 		_currentLobbyId = 0
 		_currentLobby = Null
 		_readyTransport = Null
@@ -389,11 +565,11 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 			Return
 		End If
 		_currentLobbyId = steamIDLobby
-		_matchmaking.SetLobbyData(steamIDLobby, STEAM_ONLINE_NAME_KEY, _createOptions.name)
-		_matchmaking.SetLobbyJoinable(steamIDLobby, _createOptions.joinable)
-		_matchmaking.SetLobbyData(steamIDLobby, STEAM_ONLINE_JOINABLE_KEY, String(Int(_createOptions.joinable <> 0)))
+		_backend.SetLobbyData(steamIDLobby, STEAM_ONLINE_NAME_KEY, _createOptions.name)
+		_backend.SetLobbyJoinable(steamIDLobby, _createOptions.joinable)
+		_backend.SetLobbyData(steamIDLobby, STEAM_ONLINE_JOINABLE_KEY, String(Int(_createOptions.joinable <> 0)))
 		For Local index:Int = 0 Until _createOptions.properties.Count()
-			_matchmaking.SetLobbyData(steamIDLobby, _createOptions.properties.KeyAt(index), _createOptions.properties.ValueAt(index))
+			_backend.SetLobbyData(steamIDLobby, _createOptions.properties.KeyAt(index), _createOptions.properties.ValueAt(index))
 		Next
 		RefreshCurrentLobby()
 		_createOptions = Null
@@ -409,7 +585,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		End If
 		_findResults = New IOnlineLobby[Int(lobbyCount)]
 		For Local index:Int = 0 Until Int(lobbyCount)
-			_findResults[index] = SnapshotLobby(_matchmaking.GetLobbyByIndex(index))
+			_findResults[index] = SnapshotLobby(_backend.LobbyByIndex(index))
 		Next
 		_findResultsRequestId = requestId
 		Queue(New SOnlineEvent(EOnlineEventKind.LobbySearchCompleted, EOnlineOperation.FindLobbies, requestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))

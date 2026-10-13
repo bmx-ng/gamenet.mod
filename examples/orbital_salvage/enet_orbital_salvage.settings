@@ -1,0 +1,7 @@
+app.name=ENet Orbital Salvage
+app.package=com.example.blitzmax.gamenet.enetorbitalsalvage
+app.version.name=1.0.0
+app.version.code=1
+app.orientation=landscape
+app.fullscreen=true
+ios.info.plist=ios/Info.extra.plist

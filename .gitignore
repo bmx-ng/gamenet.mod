@@ -74,6 +74,16 @@
 /examples/gamekit_rebound/gamekit_rebound.xcodeproj/
 /examples/gamekit_rebound/gamekitrebound.entitlements
 /examples/gamekit_rebound/main.m
+/examples/orbital_salvage/enet_orbital_salvage
+/examples/orbital_salvage/gamekit_orbital_salvage
+/examples/orbital_salvage/test_protocol
+/examples/orbital_salvage/Assets.xcassets/
+/examples/orbital_salvage/Info.plist
+/examples/orbital_salvage/LaunchScreen.storyboard
+/examples/orbital_salvage/enet_orbital_salvage.xcodeproj/
+/examples/orbital_salvage/gamekit_orbital_salvage.xcodeproj/
+/examples/orbital_salvage/gamekitorbitalsalvage.entitlements
+/examples/orbital_salvage/main.m
 /examples/steam_session/steam_session
 /examples/steam_session/steam_appid.txt
 /examples/steam_session/libsteam_api.dylib

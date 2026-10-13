@@ -13,10 +13,11 @@ Module GameNet.SteamOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.3"
+ModuleInfo "Version: 0.4"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
+ModuleInfo "History: 0.4 Added known dedicated-server routing through Steam lobbies"
 ModuleInfo "History: 0.3 Added an optional Steam Networking Sockets transport"
 ModuleInfo "History: 0.2 Added a testable Steam backend boundary and provider flow tests"
 ModuleInfo "History: 0.1 Initial Steam lobby provider"
@@ -32,6 +33,7 @@ Const STEAM_ONLINE_EVENT_CAPACITY:Int = 64
 Const STEAM_ONLINE_NAME_KEY:String = "gamenet.name"
 Const STEAM_ONLINE_START_KEY:String = "gamenet.start"
 Const STEAM_ONLINE_JOINABLE_KEY:String = "gamenet.joinable"
+Const STEAM_ONLINE_DEDICATED_KEY:String = "gamenet.dedicated"
 
 Rem
 bbdoc: Steam networking implementation used for a lobby match.
@@ -75,10 +77,17 @@ Interface ISteamOnlineBackend
 	Method JoinLobby(lobbyId:ULong)
 	Method LeaveLobby(lobbyId:ULong)
 	Method ShowInviteDialog(lobbyId:ULong)
+	Method SetLobbyGameServer(lobbyId:ULong, ip:UInt, port:Short, steamId:ULong)
+	Method GetLobbyGameServer:Int(lobbyId:ULong, ip:UInt Var, port:Short Var, steamId:ULong Var)
 	Method CreateTransport:INetTransport(steamIds:ULong[], host:Int, channelCount:Int, maxPacketSize:Size_T)
+	Method CreateDedicatedTransport:INetTransport(ip:UInt, port:Int, steamId:ULong, channelCount:Int, maxPacketSize:Size_T)
 End Interface
 
 Private
+
+Function SteamIPv4String:String(ip:UInt)
+	Return ((ip Shr 24) & 255) + "." + ((ip Shr 16) & 255) + "." + ((ip Shr 8) & 255) + "." + (ip & 255)
+End Function
 
 Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 	Field client:TSteamClient
@@ -86,6 +95,7 @@ Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 	Field apps:TSteamApps
 	Field friends:TSteamFriends
 	Field matchmaking:TSteamMatchmaking
+	Field networkingUtils:TSteamNetworkingUtils
 	Field transportKind:ESteamOnlineTransportKind
 
 	Method New(transportKind:ESteamOnlineTransportKind)
@@ -100,6 +110,10 @@ Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 		apps = client.GetISteamApps()
 		friends = client.GetISteamFriends()
 		matchmaking = client.GetISteamMatchmaking()
+		If transportKind = ESteamOnlineTransportKind.NetworkingSockets Then
+			networkingUtils = TSteamNetworkingUtils.Create()
+			If networkingUtils Then networkingUtils.InitRelayNetworkAccess()
+		End If
 		Return user And apps And friends And matchmaking And user.BLoggedOn()
 	End Method
 
@@ -194,6 +208,12 @@ Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 	Method ShowInviteDialog(lobbyId:ULong)
 		If friends Then friends.ActivateGameOverlayInviteDialog(lobbyId)
 	End Method
+	Method SetLobbyGameServer(lobbyId:ULong, ip:UInt, port:Short, steamId:ULong)
+		matchmaking.SetLobbyGameServer(lobbyId, ip, port, steamId)
+	End Method
+	Method GetLobbyGameServer:Int(lobbyId:ULong, ip:UInt Var, port:Short Var, steamId:ULong Var)
+		Return matchmaking.GetLobbyGameServer(lobbyId, ip, port, steamId)
+	End Method
 	Method CreateTransport:INetTransport(steamIds:ULong[], host:Int, channelCount:Int, maxPacketSize:Size_T)
 		If transportKind = ESteamOnlineTransportKind.NetworkingSockets Then
 			If host Then
@@ -203,6 +223,15 @@ Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 			Return TSteamSocketsTransport.ConnectP2P(steamIds[0], 0, channelCount, maxPacketSize)
 		End If
 		Return TSteamTransport.Create(steamIds, channelCount, maxPacketSize)
+	End Method
+	Method CreateDedicatedTransport:INetTransport(ip:UInt, port:Int, steamId:ULong, channelCount:Int, maxPacketSize:Size_T)
+		If ip Then
+			Return TSteamSocketsTransport.ConnectIP(SteamIPv4String(ip), port, channelCount, maxPacketSize)
+		End If
+		If steamId Then
+			Return TSteamSocketsTransport.ConnectP2P(steamId, 0, channelCount, maxPacketSize)
+		End If
+		Return Null
 	End Method
 End Type
 
@@ -351,8 +380,29 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 
 	Method PrepareMatch(requestId:UInt)
 		If requestId = 0 Or _currentLobbyId = 0 Or _readyTransport Then Return
-		Local ownerId:ULong = _backend.LobbyOwner(_currentLobbyId)
 		Local memberCount:Int = _backend.LobbyMemberCount(_currentLobbyId)
+		If memberCount < 1 Then Return
+		Local serverIP:UInt
+		Local serverPort:Short
+		Local serverSteamId:ULong
+		Local startMode:String = _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY)
+		Local dedicated:Int = _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_DEDICATED_KEY) = "1" Or startMode = "dedicated"
+		If dedicated Then
+			If Not _backend.GetLobbyGameServer(_currentLobbyId, serverIP, serverPort, serverSteamId) Then Return
+			If Not serverIP And Not serverSteamId Then Return
+			_readyTransport = _backend.CreateDedicatedTransport(serverIP, Int(serverPort) & $ffff, serverSteamId, _channelCount, _maxPacketSize)
+			If Not _readyTransport Then
+				Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.StartMatch, requestId, EOnlineError.ProviderFailure, 0, String(_currentLobbyId), New SOnlinePlayer, "Could not connect to the Steam dedicated server"))
+				_startRequestId = 0
+				Return
+			End If
+			_readyMatchInfo = New SOnlineMatchInfo(memberCount, False, New SNetPeer(1, 1))
+			_readyRequestId = requestId
+			_startRequestId = 0
+			Queue(New SOnlineEvent(EOnlineEventKind.MatchReady, EOnlineOperation.StartMatch, requestId, EOnlineError.None, 0, String(_currentLobbyId), New SOnlinePlayer, ""))
+			Return
+		End If
+		Local ownerId:ULong = _backend.LobbyOwner(_currentLobbyId)
 		If ownerId = 0 Or memberCount < 2 Then Return
 		Local host:Int = ownerId = _localSteamId
 		Local remoteIds:ULong[]
@@ -403,7 +453,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	End Method
 
 	Method Capabilities:EOnlineCapability() Override
-		Return EOnlineCapability.CreateLobby | EOnlineCapability.FindLobbies | EOnlineCapability.Invitations | EOnlineCapability.MatchTransport
+		Return EOnlineCapability.CreateLobby | EOnlineCapability.FindLobbies | EOnlineCapability.Invitations | EOnlineCapability.MatchTransport | EOnlineCapability.DedicatedServer
 	End Method
 
 	Method State:EOnlineServiceState() Override
@@ -434,7 +484,10 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 
 	Method Pump() Override
 		If _state <> EOnlineServiceState.Closed Then _backend.Pump()
-		If _startRequestId And _currentLobbyId And _backend.LobbyOwner(_currentLobbyId) <> _localSteamId And _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY) = "1" Then PrepareMatch(_startRequestId)
+		If _startRequestId And _currentLobbyId And _backend.LobbyOwner(_currentLobbyId) <> _localSteamId Then
+			Local startMode:String = _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY)
+			If startMode = "1" Or startMode = "dedicated" Then PrepareMatch(_startRequestId)
+		End If
 	End Method
 
 	Method Poll:Int(event:SOnlineEvent Var) Override
@@ -504,6 +557,38 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		Return _backend.InviteUser(_currentLobbyId, steamId)
 	End Method
 
+	Rem
+	bbdoc: Publishes a known dedicated server for the current lobby.
+	about: Only the lobby owner may call this. @address must be a numeric IPv4
+	address when supplied. Use an empty address with a nonzero Steam game-server
+	identity for a P2P Sockets server. Server allocation and hosted-SDR tickets
+	remain the responsibility of an external hosting or coordination service.
+	End Rem
+	Method SetDedicatedServer:Int(address:String, port:Int, steamId:ULong = 0)
+		If _state <> EOnlineServiceState.Ready Or _currentLobbyId = 0 Or _backend.LobbyOwner(_currentLobbyId) <> _localSteamId Then Return False
+		If port < 0 Or port > 65535 Then Return False
+		Local ip:UInt
+		If address.Length Then
+			Local parts:String[] = address.Split(".")
+			If parts.Length <> 4 Then Return False
+			For Local part:String = EachIn parts
+				If part.Length = 0 Then Return False
+				For Local index:Int = 0 Until part.Length
+					If part[index] < 48 Or part[index] > 57 Then Return False
+				Next
+				Local component:Int = part.ToInt()
+				If component < 0 Or component > 255 Then Return False
+				ip = (ip Shl 8) | UInt(component)
+			Next
+			If ip = 0 Or port = 0 Then Return False
+		Else If steamId = 0 Then
+			Return False
+		End If
+		If Not _backend.SetLobbyData(_currentLobbyId, STEAM_ONLINE_DEDICATED_KEY, "1") Then Return False
+		_backend.SetLobbyGameServer(_currentLobbyId, ip, Short(port), steamId)
+		Return True
+	End Method
+
 	Method JoinLobby:UInt(lobbyId:String) Override
 		If _state <> EOnlineServiceState.Ready Or _currentLobbyId Or _joinRequestId Then Return 0
 		Local nativeId:ULong = lobbyId.ToULong()
@@ -543,10 +628,13 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		If _backend.LobbyOwner(_currentLobbyId) = _localSteamId Then
 			_backend.SetLobbyJoinable(_currentLobbyId, False)
 			_backend.SetLobbyData(_currentLobbyId, STEAM_ONLINE_JOINABLE_KEY, "0")
-			_backend.SetLobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY, "1")
+			Local startMode:String = "1"
+			If _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_DEDICATED_KEY) = "1" Then startMode = "dedicated"
+			_backend.SetLobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY, startMode)
 			PrepareMatch(_startRequestId)
-		Else If _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY) = "1" Then
-			PrepareMatch(_startRequestId)
+		Else
+			Local startMode:String = _backend.LobbyData(_currentLobbyId, STEAM_ONLINE_START_KEY)
+			If startMode = "1" Or startMode = "dedicated" Then PrepareMatch(_startRequestId)
 		End If
 		Return requestId
 	End Method
@@ -648,6 +736,9 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	End Method
 
 	Method OnLobbyGameCreated(steamIDLobby:ULong, steamIDGameServer:ULong, ip:UInt, port:Short) Override
+		If steamIDLobby <> _currentLobbyId Then Return
+		RefreshCurrentLobby()
+		Queue(New SOnlineEvent(EOnlineEventKind.LobbyChanged, EOnlineOperation.None, 0, EOnlineError.None, 0, String(steamIDLobby), New SOnlinePlayer, "Dedicated server assigned"))
 	End Method
 
 	Method OnLobbyInvite(steamIDUser:ULong, steamIDLobby:ULong, gameID:ULong) Override

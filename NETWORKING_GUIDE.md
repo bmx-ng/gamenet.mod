@@ -69,6 +69,13 @@ the provider for Networking Sockets, making the lobby owner a P2P listener and
 connecting the remaining members to it. Steam lobby discovery stays separate
 from either transport, matching the service/transport split in GameNet.
 
+When an allocator or developer-owned host supplies a dedicated endpoint, the
+lobby owner can publish it through `TSteamOnlineService.SetDedicatedServer`.
+All lobby members then receive client transports connected to that server. The
+same route supports a direct IPv4 listener or a Steam-identity P2P listener;
+automatic hosted-SDR allocation and ticket exchange remain deliberately
+outside this layer until there is a real hosting service to coordinate them.
+
 ## Plan packet sizes rather than relying on fragmentation
 
 A transport's maximum accepted packet is not necessarily a good size to send

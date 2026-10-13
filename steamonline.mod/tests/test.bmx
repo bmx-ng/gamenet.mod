@@ -55,6 +55,10 @@ Type TMockSteamOnlineBackend Implements ISteamOnlineBackend
 	Field searchLobbyIds:ULong[] = [ULong(500)]
 	Field transportIds:ULong[] = New ULong[0]
 	Field transportHost:Int
+	Field serverIP:UInt
+	Field serverPort:Short
+	Field serverSteamId:ULong
+	Field dedicatedTransportCreated:Int
 	Field transport:TMockTransport
 	Field pumpCount:Int
 	Field commandLine:String
@@ -150,9 +154,28 @@ Type TMockSteamOnlineBackend Implements ISteamOnlineBackend
 	Method ShowInviteDialog(id:ULong)
 		inviteDialogLobbyId = id
 	End Method
+	Method SetLobbyGameServer(id:ULong, ip:UInt, port:Short, steamId:ULong)
+		serverIP = ip
+		serverPort = port
+		serverSteamId = steamId
+	End Method
+	Method GetLobbyGameServer:Int(id:ULong, ip:UInt Var, port:Short Var, steamId:ULong Var)
+		ip = serverIP
+		port = serverPort
+		steamId = serverSteamId
+		Return serverIP <> 0 Or serverSteamId <> 0
+	End Method
 	Method CreateTransport:INetTransport(steamIds:ULong[], host:Int, channelCount:Int, maxPacketSize:Size_T)
 		transportIds = steamIds[..]
 		transportHost = host
+		transport = New TMockTransport
+		Return transport
+	End Method
+	Method CreateDedicatedTransport:INetTransport(ip:UInt, port:Int, steamId:ULong, channelCount:Int, maxPacketSize:Size_T)
+		serverIP = ip
+		serverPort = Short(port)
+		serverSteamId = steamId
+		dedicatedTransportCreated = True
 		transport = New TMockTransport
 		Return transport
 	End Method
@@ -234,6 +257,45 @@ Check(event.SubjectId() = "700" And event.Player().Id() = "30", "report Steam in
 client.Close()
 NextEvent(client, EOnlineEventKind.ServiceClosed)
 Check(clientBackend.leftLobbyId = 500 And clientBackend.listener = Null, "close provider cleanly")
+
+' Exercise a lobby owner routing every player to a known dedicated server.
+Local dedicatedBackend:TMockSteamOnlineBackend = New TMockSteamOnlineBackend
+Local dedicated:TSteamOnlineService = TSteamOnlineService.CreateForBackend(dedicatedBackend, 2, 900)
+dedicated.Open()
+NextEvent(dedicated, EOnlineEventKind.ServiceReady)
+dedicated.CreateLobby(options)
+dedicated.OnLobbyCreated(EResult.k_EResultOK, dedicatedBackend.lobbyId, False)
+NextEvent(dedicated, EOnlineEventKind.LobbyCreated)
+Check(dedicated.SetDedicatedServer("203.0.113.7", 27015, 42), "publish dedicated server")
+startRequest = dedicated.StartMatch()
+event = NextEvent(dedicated, EOnlineEventKind.MatchReady)
+Check(dedicated.MatchInfo(startRequest, info), "publish dedicated match")
+Check(Not info.IsSessionHost() And info.SessionHostPeer().IsValid(), "all lobby members join dedicated host")
+Check(dedicatedBackend.serverIP = $cb007107:UInt And (Int(dedicatedBackend.serverPort) & $ffff) = 27015 And dedicatedBackend.serverSteamId = 42, "retain dedicated endpoint")
+Check(dedicatedBackend.dedicatedTransportCreated, "create dedicated transport")
+Check(dedicated.TakeMatchTransport(startRequest) <> Null, "take dedicated transport")
+
+' A joined client waits when the dedicated assignment has not propagated yet.
+Local dedicatedClientBackend:TMockSteamOnlineBackend = New TMockSteamOnlineBackend
+dedicatedClientBackend.localId = 20
+dedicatedClientBackend.ownerId = 10
+dedicatedClientBackend.properties.Set(STEAM_ONLINE_DEDICATED_KEY, "1")
+dedicatedClientBackend.properties.Set(STEAM_ONLINE_START_KEY, "dedicated")
+Local dedicatedClient:TSteamOnlineService = TSteamOnlineService.CreateForBackend(dedicatedClientBackend, 2, 900)
+dedicatedClient.Open()
+NextEvent(dedicatedClient, EOnlineEventKind.ServiceReady)
+dedicatedClient.JoinLobby("500")
+dedicatedClient.OnLobbyEnter(500, False, EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess)
+NextEvent(dedicatedClient, EOnlineEventKind.LobbyJoined)
+startRequest = dedicatedClient.StartMatch()
+Local waitingEvent:SOnlineEvent
+Check(Not dedicatedClient.Poll(waitingEvent), "wait for dedicated endpoint propagation")
+dedicatedClientBackend.serverIP = $cb007107:UInt
+dedicatedClientBackend.serverPort = Short(27015)
+dedicatedClient.Pump()
+event = NextEvent(dedicatedClient, EOnlineEventKind.MatchReady)
+Check(dedicatedClient.MatchInfo(startRequest, info) And Not info.IsSessionHost(), "joined client connects to dedicated server")
+Check(dedicatedClientBackend.dedicatedTransportCreated, "joined client creates dedicated transport")
 
 ' Authentication and provider failures remain correlated and recoverable.
 Local failedBackend:TMockSteamOnlineBackend = New TMockSteamOnlineBackend

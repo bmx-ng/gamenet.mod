@@ -2,7 +2,7 @@
 
 This desktop example exercises the complete initial Steam path:
 
-`GameNet.Online -> GameNet.SteamOnline -> Steam lobby -> GameNet.Steam -> GameNet.Session`
+`GameNet.Online -> GameNet.SteamOnline -> Steam lobby -> GameNet.SteamSockets -> GameNet.Session`
 
 Steam must be running. During local development, place an appropriate
 `steam_appid.txt` beside the executable and copy the platform Steam API runtime
@@ -13,5 +13,6 @@ different Steam accounts.
 2. Select **Create Lobby** on one computer.
 3. Select **Invite Friends** and accept through Steam, or select **Find Lobby**
    on the other computer to join the first matching test lobby.
-4. Select **Start Match** on both. The lobby owner coordinates the start.
+4. Select **Start Match** on both. The lobby owner coordinates the start and
+   accepts the P2P Networking Sockets connection.
 5. Select **Send Packet** to verify bidirectional reliable traffic.

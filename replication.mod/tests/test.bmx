@@ -19,6 +19,10 @@ Const FIELD_SCORE:UInt = 1
 Const FIELD_X:UInt = 2
 Const FIELD_ALIVE:UInt = 3
 Const FIELD_NAME:UInt = 4
+Const SNAPSHOT_TYPE:UInt = 2
+Const FIELD_SNAPSHOT_X:UInt = 1
+Const MISMATCH_TYPE:UInt = 3
+Const FIELD_MISMATCH_VALUE:UInt = 1
 
 Function CreatePlayerSchema:TReplicationSchema()
 	Local schema:TReplicationSchema = TReplicationSchema.Create(PLAYER_TYPE, 3, 8)
@@ -31,10 +35,35 @@ Function CreatePlayerSchema:TReplicationSchema()
 	Return schema
 End Function
 
+Function CreateSnapshotSchema:TReplicationSchema()
+	Local schema:TReplicationSchema = TReplicationSchema.Create(SNAPSHOT_TYPE, 1, 2)
+	Check(schema <> Null, "create snapshot schema")
+	Check(schema.AddFloat32(FIELD_SNAPSHOT_X), "add snapshot position")
+	Check(schema.SetUpdateMode(EReplicationUpdateMode.UnreliableSnapshots, 3), "select periodic snapshots")
+	Return schema
+End Function
+
+Function CreateMismatchSchema:TReplicationSchema(useUnsigned:Int)
+	Local schema:TReplicationSchema = TReplicationSchema.Create(MISMATCH_TYPE, 1, 1)
+	Check(schema <> Null, "create mismatch schema")
+	If useUnsigned Then
+		Check(schema.AddUInt32(FIELD_MISMATCH_VALUE), "add unsigned mismatch field")
+	Else
+		Check(schema.AddInt32(FIELD_MISMATCH_VALUE), "add signed mismatch field")
+	End If
+	Return schema
+End Function
+
 Function RouteReplication(session:TNetSession, world:TReplicationWorld, nowMillis:UInt)
 	Local event:SSessionEvent
 	While session.PollAt(event, nowMillis)
 		If event.Kind() = ESessionEventKind.Message Then Check(world.Receive(event.Peer(), event.MessageType(), event.Payload()), "route replication packet")
+	Wend
+End Function
+
+Function DiscardSessionMessages(session:TNetSession, nowMillis:UInt)
+	Local event:SSessionEvent
+	While session.PollAt(event, nowMillis)
 	Wend
 End Function
 
@@ -53,11 +82,28 @@ Check(clientSession.PollAt(sessionEvent, 0) And sessionEvent.Kind() = ESessionEv
 Local clientPeer:SNetPeer = sessionEvent.Peer()
 
 Local config:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1)
+Local requirements:SNetMemoryRequirements
+Check(TReplicationWorld.MemoryRequirements(config, requirements), "calculate replication memory requirements")
+Check(requirements.NativeBytes() = 1200 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
+Local invalidConfig:SReplicationConfig = New SReplicationConfig(0, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1)
+Check(Not TReplicationWorld.MemoryRequirements(invalidConfig, requirements), "reject invalid memory configuration")
+
 Local authority:TReplicationWorld = TReplicationWorld.CreateAuthority(hostSession, config)
 Local replica:TReplicationWorld = TReplicationWorld.CreateReplica(clientSession, config)
 Check(authority <> Null And replica <> Null, "create replication worlds")
-Check(authority.RegisterSchema(CreatePlayerSchema()), "register authority schema")
-Check(replica.RegisterSchema(CreatePlayerSchema()), "register replica schema")
+Local authorityPlayerSchema:TReplicationSchema = CreatePlayerSchema()
+Local replicaPlayerSchema:TReplicationSchema = CreatePlayerSchema()
+Check(authorityPlayerSchema.Fingerprint() = replicaPlayerSchema.Fingerprint(), "matching schemas have matching fingerprints")
+Local changedPlayerSchema:TReplicationSchema = TReplicationSchema.Create(PLAYER_TYPE, 3, 8)
+changedPlayerSchema.AddFloat32(FIELD_X)
+Check(changedPlayerSchema.Fingerprint() <> authorityPlayerSchema.Fingerprint(), "schema changes alter the fingerprint")
+Check(authority.RegisterSchema(authorityPlayerSchema), "register authority schema")
+Check(replica.RegisterSchema(replicaPlayerSchema), "register replica schema")
+Check(Not authorityPlayerSchema.SetUpdateMode(EReplicationUpdateMode.UnreliableSnapshots, 3), "registered schema is immutable")
+Check(authority.RegisterSchema(CreateSnapshotSchema()), "register authority snapshot schema")
+Check(replica.RegisterSchema(CreateSnapshotSchema()), "register replica snapshot schema")
+Check(authority.RegisterSchema(CreateMismatchSchema(False)), "register authority mismatch schema")
+Check(replica.RegisterSchema(CreateMismatchSchema(True)), "register replica mismatch schema")
 Check(authority.AddPeer(hostPeer) = ETransportResult.Ok, "add authority peer")
 Check(replica.BindAuthority(clientPeer), "bind replica authority")
 
@@ -110,11 +156,45 @@ Check(event.Reason() = 44 And Not remote.IsActive(), "despawn reason and state")
 Local replacement:TReplicatedEntity = authority.Spawn(PLAYER_TYPE)
 Check(replacement.Identity().Id() = firstIdentity.Id(), "reuse entity slot")
 Check(replacement.Identity().Generation() <> firstIdentity.Generation(), "advance entity generation")
+Check(authority.Despawn(replacement, 0, 14) = ETransportResult.Ok, "remove replacement entity")
+RouteReplication(clientSession, replica, 14)
+
+Local snapshotEntity:TReplicatedEntity = authority.Spawn(SNAPSHOT_TYPE)
+Check(snapshotEntity <> Null And snapshotEntity.SetFloat32(FIELD_SNAPSHOT_X, 10.0), "create snapshot entity")
+Check(authority.Flush(20) = ETransportResult.Ok, "flush reliable snapshot spawn")
+RouteReplication(clientSession, replica, 20)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Spawned, "snapshot entity spawn event")
+Local remoteSnapshot:TReplicatedEntity = event.Entity()
+Check(remoteSnapshot.GetFloat32(FIELD_SNAPSHOT_X) = 10.0, "replicate initial snapshot value")
+
+Check(snapshotEntity.SetFloat32(FIELD_SNAPSHOT_X, 77.0), "change snapshot field")
+Check(authority.Flush(21) = ETransportResult.Ok, "flush unreliable snapshot")
+DiscardSessionMessages(clientSession, 21)
+Check(remoteSnapshot.GetFloat32(FIELD_SNAPSHOT_X) = 10.0, "discarded snapshot leaves old value")
+Check(authority.Flush(22) = ETransportResult.Ok, "skip early periodic refresh")
+RouteReplication(clientSession, replica, 22)
+Check(Not replica.Poll(event), "no refresh before configured interval")
+Check(authority.Flush(23) = ETransportResult.Ok, "continue before periodic refresh")
+RouteReplication(clientSession, replica, 23)
+Check(Not replica.Poll(event), "still no early refresh")
+Check(authority.Flush(24) = ETransportResult.Ok, "send periodic full snapshot")
+RouteReplication(clientSession, replica, 24)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Updated, "periodic snapshot repairs loss")
+Check(event.Entity() = remoteSnapshot And remoteSnapshot.GetFloat32(FIELD_SNAPSHOT_X) = 77.0, "repaired snapshot contains complete state")
+
+Local mismatchEntity:TReplicatedEntity = authority.Spawn(MISMATCH_TYPE)
+Check(mismatchEntity <> Null And mismatchEntity.SetInt32(FIELD_MISMATCH_VALUE, -1), "create mismatched entity")
+Check(authority.Flush(25) = ETransportResult.Ok, "flush mismatched spawn")
+Check(clientSession.PollAt(sessionEvent, 25) And sessionEvent.Kind() = ESessionEventKind.Message, "receive mismatched spawn")
+Check(Not replica.Receive(sessionEvent.Peer(), sessionEvent.MessageType(), sessionEvent.Payload()), "reject mismatched schema on the wire")
+Check(replica.LastFailure() = EReplicationFailure.SchemaFingerprintMismatch, "report schema fingerprint mismatch")
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Error, "queue schema mismatch error")
 
 Local malformed:Byte[2]
 malformed[0] = 255
+Local rejectedBefore:Int = replica.RejectedPackets()
 Check(Not replica.Receive(clientPeer, REPLICATION_MESSAGE, New SPacketView(Byte Ptr(malformed), Size_T(malformed.Length))), "reject malformed packet")
-Check(replica.RejectedPackets() = 1 And replica.LastFailure() = EReplicationFailure.InvalidPacket, "report malformed packet")
+Check(replica.RejectedPackets() = rejectedBefore + 1 And replica.LastFailure() = EReplicationFailure.InvalidPacket, "report malformed packet")
 
 Check(ReplicationTickAfter(1, $ffffffff:UInt), "tick comparison wraps")
 Check(Not ReplicationTickAfter(9, 9), "equal tick is not newer")

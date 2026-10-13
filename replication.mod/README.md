@@ -28,19 +28,49 @@ player.SetString(FIELD_NAME, "Player one")
 world.Flush(tick)
 ```
 
-The initial protocol uses reliable ordered changed-field updates. This matches
+The default policy uses reliable ordered changed-field updates. This matches
 BRL.GNet's safe and approachable semantics while adding explicit entity types,
 schema versions, stable identities with generations, bounded strings,
 ownership, late-join state, and malformed-packet rejection.
+
+Movement-heavy entity types can instead use complete unreliable-sequenced
+snapshots. A changed entity is sent immediately and its complete state is
+periodically refreshed, so a later packet repairs a lost update without a
+reliable backlog:
+
+```blitzmax
+Local transformSchema:TReplicationSchema = TReplicationSchema.Create(2)
+transformSchema.AddFloat32(FIELD_X)
+transformSchema.AddFloat32(FIELD_Y)
+transformSchema.SetUpdateMode(EReplicationUpdateMode.UnreliableSnapshots, 30)
+world.RegisterSchema(transformSchema)
+```
 
 Applications continue to own `TNetSession` polling. Call `AddPeer` on an
 authority after accepting a session peer; it immediately sends that peer the
 complete current entity set. On a replica, call `BindAuthority` after joining.
 
-Schemas become immutable when registered. Every participant must register an
-identical schema for a given type and version. A later transport policy will
-add periodic unreliable snapshots and acknowledged baselines for movement-heavy
-entities without changing the entity lifecycle API.
+Schemas become immutable when registered. Spawns carry a deterministic
+fingerprint of the ordered schema definition and update policy. A receiver
+rejects a schema with the same type and version but different fields or policy,
+rather than interpreting its payload incorrectly. Increment the application
+schema version when deliberately changing a network-visible definition.
+
+Capacity can be budgeted before creating a world:
+
+```blitzmax
+Local requirements:SNetMemoryRequirements
+If Not TReplicationWorld.MemoryRequirements(config, requirements) Then
+	Throw "Invalid replication capacity"
+End If
+
+Print requirements.NativeBytes()
+Print requirements.ManagedArrayBytes()
+```
+
+The estimate covers bounded payload storage. Runtime object and array headers,
+associated target objects, and variable string contents are deliberately not
+included.
 
 The entity storage API is intentionally independent of BlitzMax game objects
 and ECS implementations. `SetTarget` can associate an ordinary game object

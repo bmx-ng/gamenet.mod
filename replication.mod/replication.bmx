@@ -25,11 +25,12 @@ Module GameNet.Replication
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
+ModuleInfo "History: 0.2 Add schema fingerprints, memory sizing, and periodic unreliable snapshots"
 ModuleInfo "History: 0.1 Initial schema, entity lifecycle, and reliable field replication"
 
 Import GameNet.Core
@@ -37,8 +38,19 @@ Import GameNet.Session
 
 Private
 
-Const REPLICATION_PROTOCOL_VERSION:UInt = 1
+Const REPLICATION_PROTOCOL_VERSION:UInt = 2
 Const REPLICATION_MINIMUM_PACKET_SIZE:Size_T = 32
+
+Function ReplicationHashByte:ULong(hash:ULong, value:UInt)
+	Return (hash ~ ULong(value & $ff:UInt)) * $100000001b3:ULong
+End Function
+
+Function ReplicationHashUInt32:ULong(hash:ULong, value:UInt)
+	For Local shift:Int = 24 To 0 Step -8
+		hash = ReplicationHashByte(hash, value Shr UInt(shift))
+	Next
+	Return hash
+End Function
 
 Enum EReplicationPacketKind:Byte
 	Spawn = 1
@@ -84,6 +96,14 @@ Enum EReplicationFieldType:Byte
 End Enum
 
 Rem
+bbdoc: Selects how ordinary entity state changes are delivered.
+End Rem
+Enum EReplicationUpdateMode:Byte
+	ReliableChanges
+	UnreliableSnapshots
+End Enum
+
+Rem
 bbdoc: Whether a replication world originates or receives authoritative state.
 End Rem
 Enum EReplicationRole:Byte
@@ -111,6 +131,7 @@ Enum EReplicationFailure:Int
 	InvalidPacket
 	UnknownSchema
 	SchemaVersionMismatch
+	SchemaFingerprintMismatch
 	EntityCapacity
 	PacketTooLarge
 	WrongAuthority
@@ -195,6 +216,8 @@ Type TReplicationSchema
 	Field _fields:SReplicationField[]
 	Field _count:Int
 	Field _frozen:Int
+	Field _updateMode:EReplicationUpdateMode
+	Field _fullRefreshTicks:UInt
 
 	Method New(typeId:UInt, version:UInt, maximumFields:Int)
 		_typeId = typeId
@@ -215,6 +238,21 @@ Type TReplicationSchema
 
 	Method Freeze()
 		_frozen = True
+	End Method
+
+	Method CalculateFingerprint:ULong()
+		Local hash:ULong = $cbf29ce484222325:ULong
+		hash = ReplicationHashUInt32(hash, _typeId)
+		hash = ReplicationHashUInt32(hash, _version)
+		hash = ReplicationHashUInt32(hash, UInt(_updateMode))
+		hash = ReplicationHashUInt32(hash, _fullRefreshTicks)
+		hash = ReplicationHashUInt32(hash, UInt(_count))
+		For Local index:Int = 0 Until _count
+			hash = ReplicationHashUInt32(hash, _fields[index].Id())
+			hash = ReplicationHashUInt32(hash, UInt(_fields[index].FieldType()))
+			hash = ReplicationHashUInt32(hash, _fields[index].MaxStringBytes())
+		Next
+		Return hash
 	End Method
 
 	Rem
@@ -239,6 +277,42 @@ Type TReplicationSchema
 
 	Method IsFrozen:Int()
 		Return _frozen
+	End Method
+
+	Rem
+	bbdoc: Returns a deterministic fingerprint of this schema's ordered definition.
+	End Rem
+	Method Fingerprint:ULong()
+		Return CalculateFingerprint()
+	End Method
+
+	Method UpdateMode:EReplicationUpdateMode()
+		Return _updateMode
+	End Method
+
+	Method FullRefreshTicks:UInt()
+		Return _fullRefreshTicks
+	End Method
+
+	Rem
+	bbdoc: Selects reliable changed fields or periodic unreliable full snapshots.
+	returns: False after registration or for an invalid mode or refresh interval.
+	about: Unreliable snapshots are sent in full whenever a field changes and
+	again after @fullRefreshTicks, allowing a later snapshot to repair loss.
+	End Rem
+	Method SetUpdateMode:Int(mode:EReplicationUpdateMode, fullRefreshTicks:UInt = 30)
+		If _frozen Then Return False
+		Select mode
+			Case EReplicationUpdateMode.ReliableChanges
+				_fullRefreshTicks = 0
+			Case EReplicationUpdateMode.UnreliableSnapshots
+				If fullRefreshTicks = 0 Then Return False
+				_fullRefreshTicks = fullRefreshTicks
+			Default
+				Return False
+		End Select
+		_updateMode = mode
+		Return True
 	End Method
 
 	Method Field:SReplicationField(index:Int)
@@ -288,6 +362,8 @@ Type TReplicatedEntity
 	Field _writable:Int
 	Field _newlySpawned:Int
 	Field _lastTick:UInt
+	Field _lastSentTick:UInt
+	Field _hasSent:Int
 
 	Method New(identity:SReplicationEntityId, schema:TReplicationSchema, ownerId:UInt, writable:Int, newlySpawned:Int)
 		_identity = identity
@@ -562,13 +638,16 @@ Type TReplicationWorld
 		_events = New SReplicationEvent[config.eventCapacity]
 	End Method
 
-	Function ValidConfig:Int(session:TNetSession, config:SReplicationConfig)
-		If Not session Then Return False
+	Function ValidConfigValues:Int(config:SReplicationConfig)
 		If config.maxEntities < 1 Or config.maxSchemas < 1 Or config.maxPeers < 1 Then Return False
 		If config.maxFieldsPerSchema < 1 Or config.maxFieldsPerSchema > 65535 Then Return False
 		If config.eventCapacity < 1 Or config.packetCapacity < REPLICATION_MINIMUM_PACKET_SIZE Then Return False
 		If config.messageType > 65535 Then Return False
 		Return True
+	End Function
+
+	Function ValidConfig:Int(session:TNetSession, config:SReplicationConfig)
+		Return session <> Null And ValidConfigValues(config)
 	End Function
 
 	Method Fail(failure:EReplicationFailure, entity:TReplicatedEntity = Null, tick:UInt = 0)
@@ -663,19 +742,20 @@ Type TReplicationWorld
 		writer.WriteUInt32(entity._identity.Generation())
 		writer.WriteUInt32(entity._schema.TypeId())
 		writer.WriteUInt32(entity._schema.Version())
+		writer.WriteUInt64(entity._schema.Fingerprint())
 		writer.WriteUInt32(entity._ownerId)
 		If Not WriteFields(writer, entity, True) Then Return 0
 		Return writer.Position()
 	End Method
 
-	Method WriteUpdate:Size_T(entity:TReplicatedEntity, tick:UInt)
+	Method WriteUpdate:Size_T(entity:TReplicatedEntity, tick:UInt, allFields:Int)
 		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Update))
 		writer.WriteUInt32(tick)
 		writer.WriteUInt32(entity._identity.Id())
 		writer.WriteUInt32(entity._identity.Generation())
-		If Not WriteFields(writer, entity, False) Then Return 0
+		If Not WriteFields(writer, entity, allFields) Then Return 0
 		Return writer.Position()
 	End Method
 
@@ -703,15 +783,15 @@ Type TReplicationWorld
 		Return writer.Position()
 	End Method
 
-	Method SendToPeer:ETransportResult(peer:SNetPeer, length:Size_T)
+	Method SendToPeer:ETransportResult(peer:SNetPeer, length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
 		If length = 0 Then
 			Fail(EReplicationFailure.PacketTooLarge)
 			Return ETransportResult.PacketTooLarge
 		End If
-		Return _session.Send(peer, _config.messageType, _config.channel, EDeliveryMode.ReliableOrdered, _packetBuffer, length)
+		Return _session.Send(peer, _config.messageType, _config.channel, delivery, _packetBuffer, length)
 	End Method
 
-	Method Broadcast:ETransportResult(length:Size_T)
+	Method Broadcast:ETransportResult(length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
 		If length = 0 Then
 			Fail(EReplicationFailure.PacketTooLarge)
 			Return ETransportResult.PacketTooLarge
@@ -719,7 +799,7 @@ Type TReplicationWorld
 		Local result:ETransportResult = ETransportResult.Ok
 		For Local index:Int = 0 Until _peers.Length
 			If Not _peerUsed[index] Then Continue
-			Local sent:ETransportResult = SendToPeer(_peers[index], length)
+			Local sent:ETransportResult = SendToPeer(_peers[index], length, delivery)
 			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
 		Next
 		Return result
@@ -792,11 +872,13 @@ Type TReplicationWorld
 
 	Method ReceiveSpawn:Int(reader:SPacketReader Var, tick:UInt)
 		Local id:UInt, generation:UInt, typeId:UInt, schemaVersion:UInt, ownerId:UInt, fieldCount:UInt
-		If Not reader.ReadUInt32(id) Or Not reader.ReadUInt32(generation) Or Not reader.ReadUInt32(typeId) Or Not reader.ReadUInt32(schemaVersion) Or Not reader.ReadUInt32(ownerId) Or Not reader.ReadUInt16(fieldCount) Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
+		Local schemaFingerprint:ULong
+		If Not reader.ReadUInt32(id) Or Not reader.ReadUInt32(generation) Or Not reader.ReadUInt32(typeId) Or Not reader.ReadUInt32(schemaVersion) Or Not reader.ReadUInt64(schemaFingerprint) Or Not reader.ReadUInt32(ownerId) Or Not reader.ReadUInt16(fieldCount) Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
 		If id = 0 Or id > UInt(_entities.Length) Or generation = 0 Then Return Reject(EReplicationFailure.EntityCapacity, Null, tick)
 		Local schema:TReplicationSchema = SchemaForType(typeId)
 		If Not schema Then Return Reject(EReplicationFailure.UnknownSchema, Null, tick)
 		If schema.Version() <> schemaVersion Then Return Reject(EReplicationFailure.SchemaVersionMismatch, Null, tick)
+		If schema.Fingerprint() <> schemaFingerprint Then Return Reject(EReplicationFailure.SchemaFingerprintMismatch, Null, tick)
 		If Not ParseFields(reader, schema, fieldCount, True) Or reader.Remaining() <> 0 Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
 
 		Local index:Int = Int(id) - 1
@@ -869,6 +951,37 @@ Type TReplicationWorld
 	End Method
 
 	Public
+	Rem
+	bbdoc: Calculates maximum bounded payload storage for @config without allocating it.
+	returns: False for an invalid configuration or Size_T arithmetic overflow.
+	about: The managed estimate includes fixed world arrays and per-field arrays
+	for every entity slot. Runtime object and array headers, target objects, and
+	the variable UTF-8 contents of string fields are not included.
+	End Rem
+	Function MemoryRequirements:Int(config:SReplicationConfig, requirements:SNetMemoryRequirements Var)
+		requirements = New SNetMemoryRequirements
+		If Not ValidConfigValues(config) Then Return False
+		Local nativeBytes:Size_T = config.packetCapacity
+		Local managedBytes:Size_T
+		Local entityCount:Size_T = Size_T(config.maxEntities)
+		Local schemaCount:Size_T = Size_T(config.maxSchemas)
+		Local peerCount:Size_T = Size_T(config.maxPeers)
+		Local fieldCount:Size_T = Size_T(config.maxFieldsPerSchema)
+		Local eventCount:Size_T = Size_T(config.eventCapacity)
+		Local entityFields:Size_T
+		If Not NetAccumulateSize(entityFields, entityCount, fieldCount) Then Return False
+		If Not NetAccumulateSize(managedBytes, schemaCount, Size_T(SizeOf(Byte Ptr Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, entityCount, Size_T(SizeOf(Byte Ptr Null) + SizeOf(UInt Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, peerCount, Size_T(SizeOf(SNetPeer) + SizeOf(Byte Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, fieldCount, Size_T(SizeOf(SDecodedReplicationField) + SizeOf(Byte Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, eventCount, Size_T(SizeOf(SReplicationEvent))) Then Return False
+		If Not NetAccumulateSize(managedBytes, entityFields, Size_T(SizeOf(SReplicationValue) + SizeOf(Byte Null))) Then Return False
+		Local totalBytes:Size_T = nativeBytes
+		If Not NetAccumulateSize(totalBytes, 1, managedBytes) Then Return False
+		requirements = New SNetMemoryRequirements(nativeBytes, managedBytes)
+		Return True
+	End Function
+
 	Function CreateAuthority:TReplicationWorld(session:TNetSession, config:SReplicationConfig)
 		If Not ValidConfig(session, config) Then Return Null
 		Return New TReplicationWorld(session, EReplicationRole.Authority, config)
@@ -989,18 +1102,28 @@ Type TReplicationWorld
 			Local entity:TReplicatedEntity = _entities[index]
 			If Not entity Or Not entity._active Then Continue
 			Local length:Size_T
+			Local delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered
 			If entity._newlySpawned Then
 				length = WriteSpawn(entity, tick)
-			Else If entity.HasDirty() Then
-				length = WriteUpdate(entity, tick)
 			Else
-				Continue
+				Select entity._schema.UpdateMode()
+					Case EReplicationUpdateMode.ReliableChanges
+						If Not entity.HasDirty() Then Continue
+						length = WriteUpdate(entity, tick, False)
+					Case EReplicationUpdateMode.UnreliableSnapshots
+						Local refreshDue:Int = entity._hasSent And UInt(tick - entity._lastSentTick) >= entity._schema.FullRefreshTicks()
+						If Not entity.HasDirty() And Not refreshDue Then Continue
+						length = WriteUpdate(entity, tick, True)
+						delivery = EDeliveryMode.UnreliableSequenced
+				End Select
 			End If
-			Local sent:ETransportResult = Broadcast(length)
+			Local sent:ETransportResult = Broadcast(length, delivery)
 			If sent = ETransportResult.Ok Then
 				entity._newlySpawned = False
 				entity.ClearDirty()
 				entity._lastTick = tick
+				entity._lastSentTick = tick
+				entity._hasSent = True
 			Else If result = ETransportResult.Ok Then
 				result = sent
 			End If

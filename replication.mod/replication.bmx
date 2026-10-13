@@ -25,11 +25,12 @@ Module GameNet.Replication
 
 ?bmxng2
 
-ModuleInfo "Version: 0.3"
+ModuleInfo "Version: 0.4"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
+ModuleInfo "History: 0.4 Add bounded per-peer entity relevance"
 ModuleInfo "History: 0.3 Add bounded application field codecs"
 ModuleInfo "History: 0.2 Add schema fingerprints, memory sizing, and periodic unreliable snapshots"
 ModuleInfo "History: 0.1 Initial schema, entity lifecycle, and reliable field replication"
@@ -716,6 +717,9 @@ Type TReplicationWorld
 	Field _generations:UInt[]
 	Field _peers:SNetPeer[]
 	Field _peerUsed:Byte[]
+	Field _peerDefaultVisible:Byte[]
+	Field _peerVisible:Byte[]
+	Field _peerKnown:Byte[]
 	Field _authorityPeer:SNetPeer
 	Field _hasAuthorityPeer:Int
 	Field _packetBuffer:Byte Ptr
@@ -740,6 +744,9 @@ Type TReplicationWorld
 		_generations = New UInt[config.maxEntities]
 		_peers = New SNetPeer[config.maxPeers]
 		_peerUsed = New Byte[config.maxPeers]
+		_peerDefaultVisible = New Byte[config.maxPeers]
+		_peerVisible = New Byte[config.maxEntities * config.maxPeers]
+		_peerKnown = New Byte[config.maxEntities * config.maxPeers]
 		_packetBuffer = MemAlloc(config.packetCapacity)
 		If config.codecCapacity Then _codecBuffer = MemAlloc(config.codecCapacity)
 		_decoded = New SDecodedReplicationField[config.maxFieldsPerSchema]
@@ -749,6 +756,7 @@ Type TReplicationWorld
 
 	Function ValidConfigValues:Int(config:SReplicationConfig)
 		If config.maxEntities < 1 Or config.maxSchemas < 1 Or config.maxPeers < 1 Then Return False
+		If Size_T(config.maxEntities) > Size_T($7fffffff) / Size_T(config.maxPeers) Then Return False
 		If config.maxFieldsPerSchema < 1 Or config.maxFieldsPerSchema > 65535 Then Return False
 		If config.eventCapacity < 1 Or config.packetCapacity < REPLICATION_MINIMUM_PACKET_SIZE Then Return False
 		If config.codecCapacity > 65535 Then Return False
@@ -797,12 +805,38 @@ Type TReplicationWorld
 		Return index
 	End Method
 
-	Method PeerAllowed:Int(peer:SNetPeer)
-		If _role = EReplicationRole.Replica Then Return _hasAuthorityPeer And _authorityPeer.Equals(peer)
+	Method ResolvePeerIndex:Int(peer:SNetPeer)
 		For Local index:Int = 0 Until _peers.Length
-			If _peerUsed[index] And _peers[index].Equals(peer) Then Return True
+			If _peerUsed[index] And _peers[index].Equals(peer) Then Return index
+		Next
+		Return -1
+	End Method
+
+	Method RelevanceIndex:Int(entityIndex:Int, peerIndex:Int)
+		Return entityIndex * _peers.Length + peerIndex
+	End Method
+
+	Method HasPendingVisibility:Int(entityIndex:Int)
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If _peerVisible[relevanceIndex] <> _peerKnown[relevanceIndex] Then Return True
 		Next
 		Return False
+	End Method
+
+	Method HasRelevantRecipients:Int(entityIndex:Int)
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If _peerVisible[relevanceIndex] And _peerKnown[relevanceIndex] Then Return True
+		Next
+		Return False
+	End Method
+
+	Method PeerAllowed:Int(peer:SNetPeer)
+		If _role = EReplicationRole.Replica Then Return _hasAuthorityPeer And _authorityPeer.Equals(peer)
+		Return ResolvePeerIndex(peer) >= 0
 	End Method
 
 	Method WriteValue:Int(writer:SPacketWriter Var, entity:TReplicatedEntity, index:Int)
@@ -927,13 +961,83 @@ Type TReplicationWorld
 		Return _session.Send(peer, _config.messageType, _config.channel, delivery, _packetBuffer, length)
 	End Method
 
-	Method Broadcast:ETransportResult(length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
+	Method SendToRelevant:ETransportResult(entityIndex:Int, length:Size_T, delivery:EDeliveryMode)
 		If length = 0 Then Return ReportWriteFailure()
 		Local result:ETransportResult = ETransportResult.Ok
-		For Local index:Int = 0 Until _peers.Length
-			If Not _peerUsed[index] Then Continue
-			Local sent:ETransportResult = SendToPeer(_peers[index], length, delivery)
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If Not _peerVisible[relevanceIndex] Or Not _peerKnown[relevanceIndex] Then Continue
+			Local sent:ETransportResult = SendToPeer(_peers[peerIndex], length, delivery)
 			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+		Next
+		Return result
+	End Method
+
+	Method SendToKnown:ETransportResult(entityIndex:Int, length:Size_T)
+		If length = 0 Then Return ReportWriteFailure()
+		Local result:ETransportResult = ETransportResult.Ok
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If Not _peerKnown[relevanceIndex] Then Continue
+			Local sent:ETransportResult = SendToPeer(_peers[peerIndex], length)
+			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+		Next
+		Return result
+	End Method
+
+	Method SynchronizeVisibility:ETransportResult(entity:TReplicatedEntity, entityIndex:Int, tick:UInt)
+		Local result:ETransportResult = ETransportResult.Ok
+		Local spawnLength:Size_T
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If Not _peerVisible[relevanceIndex] Or _peerKnown[relevanceIndex] Then Continue
+			If spawnLength = 0 Then
+				spawnLength = WriteSpawn(entity, tick)
+				If spawnLength = 0 Then Return ReportWriteFailure()
+			End If
+			Local sent:ETransportResult = SendToPeer(_peers[peerIndex], spawnLength)
+			If sent = ETransportResult.Ok Then
+				_peerKnown[relevanceIndex] = True
+			Else If result = ETransportResult.Ok Then
+				result = sent
+			End If
+		Next
+
+		Local despawnLength:Size_T
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If _peerVisible[relevanceIndex] Or Not _peerKnown[relevanceIndex] Then Continue
+			If despawnLength = 0 Then
+				despawnLength = WriteDespawn(entity, tick, 0)
+				If despawnLength = 0 Then Return ReportWriteFailure()
+			End If
+			Local sent:ETransportResult = SendToPeer(_peers[peerIndex], despawnLength)
+			If sent = ETransportResult.Ok Then
+				_peerKnown[relevanceIndex] = False
+			Else If result = ETransportResult.Ok Then
+				result = sent
+			End If
+		Next
+		Return result
+	End Method
+
+	Method SynchronizePeer:ETransportResult(peerIndex:Int, tick:UInt)
+		Local result:ETransportResult = ETransportResult.Ok
+		For Local entityIndex:Int = 0 Until _entities.Length
+			Local entity:TReplicatedEntity = _entities[entityIndex]
+			If Not entity Or Not entity._active Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If Not _peerVisible[relevanceIndex] Or _peerKnown[relevanceIndex] Then Continue
+			Local sent:ETransportResult = SendToPeer(_peers[peerIndex], WriteSpawn(entity, tick))
+			If sent = ETransportResult.Ok Then
+				_peerKnown[relevanceIndex] = True
+			Else If result = ETransportResult.Ok Then
+				result = sent
+			End If
 		Next
 		Return result
 	End Method
@@ -1116,13 +1220,16 @@ Type TReplicationWorld
 		Local fieldCount:Size_T = Size_T(config.maxFieldsPerSchema)
 		Local eventCount:Size_T = Size_T(config.eventCapacity)
 		Local entityFields:Size_T
+		Local relevanceSlots:Size_T
 		If Not NetAccumulateSize(entityFields, entityCount, fieldCount) Then Return False
+		If Not NetAccumulateSize(relevanceSlots, entityCount, peerCount) Then Return False
 		If Not NetAccumulateSize(managedBytes, schemaCount, Size_T(SizeOf(Byte Ptr Null))) Then Return False
 		If Not NetAccumulateSize(managedBytes, entityCount, Size_T(SizeOf(Byte Ptr Null) + SizeOf(UInt Null))) Then Return False
-		If Not NetAccumulateSize(managedBytes, peerCount, Size_T(SizeOf(SNetPeer) + SizeOf(Byte Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, peerCount, Size_T(SizeOf(SNetPeer) + SizeOf(Byte Null) * 2)) Then Return False
 		If Not NetAccumulateSize(managedBytes, fieldCount, Size_T(SizeOf(SDecodedReplicationField) + SizeOf(Byte Null))) Then Return False
 		If Not NetAccumulateSize(managedBytes, eventCount, Size_T(SizeOf(SReplicationEvent))) Then Return False
 		If Not NetAccumulateSize(managedBytes, entityFields, Size_T(SizeOf(SReplicationValue) + SizeOf(Byte Null))) Then Return False
+		If Not NetAccumulateSize(managedBytes, relevanceSlots, 2) Then Return False
 		Local totalBytes:Size_T = nativeBytes
 		If Not NetAccumulateSize(totalBytes, 1, managedBytes) Then Return False
 		requirements = New SNetMemoryRequirements(nativeBytes, managedBytes)
@@ -1166,10 +1273,17 @@ Type TReplicationWorld
 		Return True
 	End Method
 
-	Method AddPeer:ETransportResult(peer:SNetPeer, tick:UInt = 0)
+	Rem
+	bbdoc: Adds an accepted session peer and optionally reveals all existing entities.
+	about: Passing False for @initiallyVisible lets an application establish its
+	interest set with #SetPeerVisible before sending any entity state, and makes
+	future entities hidden from that peer by default. Calling AddPeer again
+	retries any complete spawns which previously could not be sent.
+	End Rem
+	Method AddPeer:ETransportResult(peer:SNetPeer, tick:UInt = 0, initiallyVisible:Int = True)
 		If _role <> EReplicationRole.Authority Or Not peer.IsValid() Then Return ETransportResult.InvalidPeer
 		For Local index:Int = 0 Until _peers.Length
-			If _peerUsed[index] And _peers[index].Equals(peer) Then Return ETransportResult.Ok
+			If _peerUsed[index] And _peers[index].Equals(peer) Then Return SynchronizePeer(index, tick)
 		Next
 		Local freeIndex:Int = -1
 		For Local index:Int = 0 Until _peers.Length
@@ -1178,25 +1292,90 @@ Type TReplicationWorld
 		If freeIndex < 0 Then Return ETransportResult.WouldBlock
 		_peers[freeIndex] = peer
 		_peerUsed[freeIndex] = True
-		Local result:ETransportResult = ETransportResult.Ok
-		For Local index:Int = 0 Until _entities.Length
-			Local entity:TReplicatedEntity = _entities[index]
-			If Not entity Or Not entity._active Then Continue
-			Local sent:ETransportResult = SendToPeer(peer, WriteSpawn(entity, tick))
-			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+		_peerDefaultVisible[freeIndex] = initiallyVisible <> 0
+		For Local entityIndex:Int = 0 Until _entities.Length
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, freeIndex)
+			_peerVisible[relevanceIndex] = initiallyVisible <> 0
+			_peerKnown[relevanceIndex] = False
 		Next
-		Return result
+		Return SynchronizePeer(freeIndex, tick)
 	End Method
 
 	Method RemovePeer:Int(peer:SNetPeer)
 		For Local index:Int = 0 Until _peers.Length
 			If _peerUsed[index] And _peers[index].Equals(peer) Then
+				For Local entityIndex:Int = 0 Until _entities.Length
+					Local relevanceIndex:Int = RelevanceIndex(entityIndex, index)
+					_peerVisible[relevanceIndex] = False
+					_peerKnown[relevanceIndex] = False
+				Next
 				_peerUsed[index] = False
+				_peerDefaultVisible[index] = False
 				_peers[index] = New SNetPeer
 				Return True
 			End If
 		Next
 		Return False
+	End Method
+
+	Rem
+	bbdoc: Reveals or hides @entity for one authority peer.
+	returns: Ok after the reliable complete spawn or despawn is queued, or a
+	transport failure which #Flush can retry.
+	about: Hidden entities continue to exist and may be updated by the authority.
+	Revealing one later sends its complete current state with the same stable
+	identity. The optional @reason is included in an immediate hide transition.
+	End Rem
+	Method SetPeerVisible:ETransportResult(entity:TReplicatedEntity, peer:SNetPeer, visible:Int, tick:UInt = 0, reason:Int = 0)
+		If _role <> EReplicationRole.Authority Or Not entity Then Return ETransportResult.InvalidPeer
+		Local entityIndex:Int = ResolveEntityIndex(entity._identity)
+		Local peerIndex:Int = ResolvePeerIndex(peer)
+		If entityIndex < 0 Or peerIndex < 0 Then Return ETransportResult.InvalidPeer
+		Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+		_peerVisible[relevanceIndex] = visible <> 0
+		If _peerVisible[relevanceIndex] = _peerKnown[relevanceIndex] Then Return ETransportResult.Ok
+		Local sent:ETransportResult
+		If visible Then
+			sent = SendToPeer(peer, WriteSpawn(entity, tick))
+		Else
+			sent = SendToPeer(peer, WriteDespawn(entity, tick, reason))
+		End If
+		If sent = ETransportResult.Ok Then _peerKnown[relevanceIndex] = _peerVisible[relevanceIndex]
+		Return sent
+	End Method
+
+	Rem
+	bbdoc: Returns whether @entity is intended to be visible to @peer.
+	End Rem
+	Method IsPeerVisible:Int(entity:TReplicatedEntity, peer:SNetPeer)
+		If _role <> EReplicationRole.Authority Or Not entity Then Return False
+		Local entityIndex:Int = ResolveEntityIndex(entity._identity)
+		Local peerIndex:Int = ResolvePeerIndex(peer)
+		If entityIndex < 0 Or peerIndex < 0 Then Return False
+		Return _peerVisible[RelevanceIndex(entityIndex, peerIndex)] <> 0
+	End Method
+
+	Rem
+	bbdoc: Selects whether entities spawned later are initially visible to @peer.
+	about: Existing entities retain their current visibility. Use #SetPeerVisible
+	to alter those explicitly.
+	End Rem
+	Method SetPeerDefaultVisible:Int(peer:SNetPeer, visible:Int)
+		If _role <> EReplicationRole.Authority Then Return False
+		Local peerIndex:Int = ResolvePeerIndex(peer)
+		If peerIndex < 0 Then Return False
+		_peerDefaultVisible[peerIndex] = visible <> 0
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns whether entities spawned later default to visible for @peer.
+	End Rem
+	Method PeerDefaultVisible:Int(peer:SNetPeer)
+		If _role <> EReplicationRole.Authority Then Return False
+		Local peerIndex:Int = ResolvePeerIndex(peer)
+		If peerIndex < 0 Then Return False
+		Return _peerDefaultVisible[peerIndex] <> 0
 	End Method
 
 	Method BindAuthority:Int(peer:SNetPeer)
@@ -1218,6 +1397,11 @@ Type TReplicationWorld
 			Local entity:TReplicatedEntity = New TReplicatedEntity(identity, schema, ownerId, True, True)
 			entity._target = target
 			_entities[index] = entity
+			For Local peerIndex:Int = 0 Until _peers.Length
+				Local relevanceIndex:Int = RelevanceIndex(index, peerIndex)
+				_peerVisible[relevanceIndex] = _peerUsed[peerIndex] And _peerDefaultVisible[peerIndex]
+				_peerKnown[relevanceIndex] = False
+			Next
 			QueueEvent(EReplicationEventKind.Spawned, entity, 0)
 			Return entity
 		Next
@@ -1251,32 +1435,40 @@ Type TReplicationWorld
 	Method Flush:ETransportResult(tick:UInt)
 		If _role <> EReplicationRole.Authority Then Return ETransportResult.Failed
 		Local result:ETransportResult = ETransportResult.Ok
-		For Local index:Int = 0 Until _entities.Length
-			Local entity:TReplicatedEntity = _entities[index]
+		For Local entityIndex:Int = 0 Until _entities.Length
+			Local entity:TReplicatedEntity = _entities[entityIndex]
 			If Not entity Or Not entity._active Then Continue
-			Local length:Size_T
+			Local shouldUpdate:Int
+			Local allFields:Int
 			Local delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered
-			If entity._newlySpawned Then
-				length = WriteSpawn(entity, tick)
-			Else
+			If Not entity._newlySpawned Then
 				Select entity._schema.UpdateMode()
 					Case EReplicationUpdateMode.ReliableChanges
-						If Not entity.HasDirty() Then Continue
-						length = WriteUpdate(entity, tick, False)
+						shouldUpdate = entity.HasDirty()
 					Case EReplicationUpdateMode.UnreliableSnapshots
 						Local refreshDue:Int = entity._hasSent And UInt(tick - entity._lastSentTick) >= entity._schema.FullRefreshTicks()
-						If Not entity.HasDirty() And Not refreshDue Then Continue
-						length = WriteUpdate(entity, tick, True)
-						delivery = EDeliveryMode.UnreliableSequenced
+						shouldUpdate = entity.HasDirty() Or refreshDue
+						allFields = True
+						delivery = EDeliveryMode.Unreliable
 				End Select
 			End If
-			Local sent:ETransportResult = Broadcast(length, delivery)
+			Local pendingVisibility:Int = HasPendingVisibility(entityIndex)
+			If Not entity._newlySpawned And Not shouldUpdate And Not pendingVisibility Then Continue
+
+			Local sent:ETransportResult = ETransportResult.Ok
+			If shouldUpdate And HasRelevantRecipients(entityIndex) Then sent = SendToRelevant(entityIndex, WriteUpdate(entity, tick, allFields), delivery)
+			If sent = ETransportResult.Ok Then
+				Local synchronized:ETransportResult = SynchronizeVisibility(entity, entityIndex, tick)
+				If synchronized <> ETransportResult.Ok Then sent = synchronized
+			End If
 			If sent = ETransportResult.Ok Then
 				entity._newlySpawned = False
-				entity.ClearDirty()
-				entity._lastTick = tick
-				entity._lastSentTick = tick
-				entity._hasSent = True
+				If shouldUpdate Or entity.HasDirty() Then entity.ClearDirty()
+				If shouldUpdate Or entity._lastTick = 0 Then
+					entity._lastTick = tick
+					entity._lastSentTick = tick
+					entity._hasSent = True
+				End If
 			Else If result = ETransportResult.Ok Then
 				result = sent
 			End If
@@ -1285,10 +1477,12 @@ Type TReplicationWorld
 	End Method
 
 	Method SetOwner:ETransportResult(entity:TReplicatedEntity, ownerId:UInt, tick:UInt)
-		If _role <> EReplicationRole.Authority Or Not entity Or ResolveEntityIndex(entity._identity) < 0 Then Return ETransportResult.InvalidPeer
+		If _role <> EReplicationRole.Authority Or Not entity Then Return ETransportResult.InvalidPeer
+		Local entityIndex:Int = ResolveEntityIndex(entity._identity)
+		If entityIndex < 0 Then Return ETransportResult.InvalidPeer
 		If entity._ownerId = ownerId Then Return ETransportResult.Ok
 		entity._ownerId = ownerId
-		Local result:ETransportResult = Broadcast(WriteOwnership(entity, tick))
+		Local result:ETransportResult = SendToRelevant(entityIndex, WriteOwnership(entity, tick), EDeliveryMode.ReliableOrdered)
 		If result = ETransportResult.Ok Then
 			entity._lastTick = tick
 			QueueEvent(EReplicationEventKind.OwnershipChanged, entity, tick)
@@ -1300,8 +1494,13 @@ Type TReplicationWorld
 		If _role <> EReplicationRole.Authority Or Not entity Then Return ETransportResult.Failed
 		Local index:Int = ResolveEntityIndex(entity._identity)
 		If index < 0 Then Return ETransportResult.InvalidPeer
-		Local result:ETransportResult = Broadcast(WriteDespawn(entity, tick, reason))
+		Local result:ETransportResult = SendToKnown(index, WriteDespawn(entity, tick, reason))
 		If result <> ETransportResult.Ok Then Return result
+		For Local peerIndex:Int = 0 Until _peers.Length
+			Local relevanceIndex:Int = RelevanceIndex(index, peerIndex)
+			_peerVisible[relevanceIndex] = False
+			_peerKnown[relevanceIndex] = False
+		Next
 		entity._active = False
 		entity._lastTick = tick
 		_entities[index] = Null

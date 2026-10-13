@@ -33,8 +33,8 @@ BRL.GNet's safe and approachable semantics while adding explicit entity types,
 schema versions, stable identities with generations, bounded strings,
 ownership, late-join state, and malformed-packet rejection.
 
-Movement-heavy entity types can instead use complete unreliable-sequenced
-snapshots. A changed entity is sent immediately and its complete state is
+Movement-heavy entity types can instead use complete unreliable snapshots.
+A changed entity is sent immediately and its complete state is
 periodically refreshed, so a later packet repairs a lost update without a
 reliable backlog:
 
@@ -45,6 +45,10 @@ transformSchema.AddFloat32(FIELD_Y)
 transformSchema.SetUpdateMode(EReplicationUpdateMode.UnreliableSnapshots, 30)
 world.RegisterSchema(transformSchema)
 ```
+
+Snapshots use unsequenced unreliable delivery because many entities share a
+session channel. Per-entity ticks discard stale packets without allowing a
+newer packet for one entity to suppress an unrelated entity's packet.
 
 Applications continue to own `TNetSession` polling. Call `AddPeer` on an
 authority after accepting a session peer; it immediately sends that peer the
@@ -71,6 +75,43 @@ Print requirements.ManagedArrayBytes()
 The estimate covers bounded payload storage. Runtime object and array headers,
 associated target objects, and variable string contents are deliberately not
 included.
+
+## Per-peer relevance
+
+Entities are visible to every registered peer by default, preserving the
+simple GNet-style model. An authority can hide entities which are irrelevant
+to one player—for example, distant map regions, private inventory, or objects
+inside another match instance:
+
+```blitzmax
+world.SetPeerVisible(entity, peer, False, tick)
+```
+
+Hiding queues a reliable despawn for that peer but does not destroy the
+authority entity. It can continue changing while hidden without sending field
+updates. Revealing it later sends a reliable complete spawn with its current
+state and the same stable identity:
+
+```blitzmax
+world.SetPeerVisible(entity, peer, True, tick)
+```
+
+`IsPeerVisible` queries the intended state. Failed visibility transitions are
+retained and retried by `Flush`. A newly accepted peer can start with an empty
+interest set, avoiding a short-lived download of the entire world. Entities
+created later are also hidden from that peer until explicitly revealed:
+
+```blitzmax
+world.AddPeer(peer, tick, False)
+world.SetPeerVisible(localPlayer, peer, True, tick)
+```
+
+`SetPeerDefaultVisible` changes the policy for subsequently spawned entities
+without changing the visibility of entities which already exist.
+
+The authority reserves two bytes per entity/peer pair for intended and known
+visibility. This is included in `MemoryRequirements` and does not allocate
+during ordinary relevance changes.
 
 ## Custom field codecs
 

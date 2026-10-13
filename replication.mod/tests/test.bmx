@@ -113,6 +113,13 @@ Function DiscardSessionMessages(session:TNetSession, nowMillis:UInt)
 	Wend
 End Function
 
+Function PollEntityEvent:Int(world:TReplicationWorld, entity:TReplicatedEntity, kind:EReplicationEventKind, event:SReplicationEvent Var)
+	While world.Poll(event)
+		If event.Entity() = entity And event.Kind() = kind Then Return True
+	Wend
+	Return False
+End Function
+
 Local pair:TLoopbackPair = TLoopbackPair.Create(64, 1200)
 Local hostSession:TNetSession = TNetSession.CreateHost(pair.First(), APP_ID, APP_VERSION, 1, 1200)
 Local clientSession:TNetSession = TNetSession.CreateClient(pair.Second(), APP_ID, APP_VERSION, Null, 0, 1, 1200)
@@ -242,10 +249,18 @@ Check(Not replica.Receive(sessionEvent.Peer(), sessionEvent.MessageType(), sessi
 Check(replica.LastFailure() = EReplicationFailure.SchemaFingerprintMismatch, "report schema fingerprint mismatch")
 Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Error, "queue schema mismatch error")
 
+Check(authority.SetPeerDefaultVisible(hostPeer, False), "hide future entities by default")
+Check(Not authority.PeerDefaultVisible(hostPeer), "report hidden default")
 Local codecEntity:TReplicatedEntity = authority.Spawn(CODEC_TYPE)
 Local position:TPositionState = New TPositionState(12.5, -8.25)
 Check(codecEntity <> Null And codecEntity.SetCustom(FIELD_POSITION, position), "assign custom codec value")
-Check(authority.Flush(26) = ETransportResult.Ok, "flush custom codec spawn")
+Check(Not authority.IsPeerVisible(codecEntity, hostPeer), "new entity follows peer visibility default")
+Check(authority.Flush(26) = ETransportResult.Ok, "flush hidden custom codec spawn")
+RouteReplication(clientSession, replica, 26)
+Check(Not replica.Poll(event), "hidden new entity sends no spawn")
+Check(authority.SetPeerDefaultVisible(hostPeer, True), "restore visible default")
+Check(authority.PeerDefaultVisible(hostPeer), "report visible default")
+Check(authority.SetPeerVisible(codecEntity, hostPeer, True, 26) = ETransportResult.Ok, "reveal initially hidden entity")
 RouteReplication(clientSession, replica, 26)
 Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Spawned, "custom codec spawn event")
 Local remoteCodecEntity:TReplicatedEntity = event.Entity()
@@ -256,11 +271,31 @@ position.y = 42.0
 Check(codecEntity.MarkCustomDirty(FIELD_POSITION), "mark mutable custom value dirty")
 Check(authority.Flush(27) = ETransportResult.Ok, "flush custom codec update")
 RouteReplication(clientSession, replica, 27)
-Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Updated, "custom codec update event")
+Check(PollEntityEvent(replica, remoteCodecEntity, EReplicationEventKind.Updated, event), "custom codec update event")
 remotePosition = TPositionState(remoteCodecEntity.GetCustom(FIELD_POSITION))
 Check(remotePosition.x = 91.0 And remotePosition.y = 42.0, "update custom codec value")
+Check(authority.IsPeerVisible(codecEntity, hostPeer), "entity is visible by default")
+Check(authority.SetPeerVisible(codecEntity, hostPeer, False, 28, 55) = ETransportResult.Ok, "hide entity from peer")
+Check(Not authority.IsPeerVisible(codecEntity, hostPeer), "report hidden entity")
+RouteReplication(clientSession, replica, 28)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Despawned, "hidden entity despawn event")
+Check(event.Entity() = remoteCodecEntity And event.Reason() = 55, "preserve hide reason")
+position.x = -14.0
+position.y = 6.5
+Check(codecEntity.MarkCustomDirty(FIELD_POSITION), "update hidden entity")
+Check(authority.Flush(29) = ETransportResult.Ok, "flush while entity is hidden")
+RouteReplication(clientSession, replica, 29)
+Check(Not replica.Poll(event), "hidden entity sends no ordinary update")
+Check(authority.SetPeerVisible(codecEntity, hostPeer, True, 30) = ETransportResult.Ok, "reveal entity to peer")
+Check(authority.IsPeerVisible(codecEntity, hostPeer), "report revealed entity")
+RouteReplication(clientSession, replica, 30)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Spawned, "revealed entity spawn event")
+remoteCodecEntity = event.Entity()
+remotePosition = TPositionState(remoteCodecEntity.GetCustom(FIELD_POSITION))
+Check(remotePosition.x = -14.0 And remotePosition.y = 6.5, "reveal complete current state")
+Check(remoteCodecEntity.Identity().Equals(codecEntity.Identity()), "reveal preserves stable identity")
 Check(codecEntity.SetCustom(FIELD_POSITION, Null), "allow codec to validate a custom value")
-Check(authority.Flush(28) = ETransportResult.Failed, "surface custom codec encoding failure")
+Check(authority.Flush(31) = ETransportResult.Failed, "surface custom codec encoding failure")
 Check(authority.LastFailure() = EReplicationFailure.CodecFailure, "report custom codec failure")
 
 Local malformed:Byte[2]

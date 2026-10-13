@@ -121,6 +121,13 @@ Function PollEntityEvent:Int(world:TReplicationWorld, entity:TReplicatedEntity, 
 	Return found
 End Function
 
+Function PollMessageEvent:Int(world:TReplicationWorld, messageId:UInt, event:SReplicationEvent Var)
+	While world.Poll(event)
+		If event.Kind() = EReplicationEventKind.Message And event.MessageId() = messageId Then Return True
+	Wend
+	Return False
+End Function
+
 Local pair:TLoopbackPair = TLoopbackPair.Create(64, 1200)
 Local hostSession:TNetSession = TNetSession.CreateHost(pair.First(), APP_ID, APP_VERSION, 1, 1200)
 Local clientSession:TNetSession = TNetSession.CreateClient(pair.Second(), APP_ID, APP_VERSION, Null, 0, 1, 1200)
@@ -138,11 +145,14 @@ Local clientPeer:SNetPeer = sessionEvent.Peer()
 Local config:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1, 64, 2)
 Local requirements:SNetMemoryRequirements
 Check(TReplicationWorld.MemoryRequirements(config, requirements), "calculate replication memory requirements")
-Check(requirements.NativeBytes() = 2464 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
+Check(requirements.NativeBytes() = 10656 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
 Local invalidConfig:SReplicationConfig = New SReplicationConfig(0, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1)
 Check(Not TReplicationWorld.MemoryRequirements(invalidConfig, requirements), "reject invalid memory configuration")
 Local invalidBatchConfig:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1, 0, 0)
 Check(Not TReplicationWorld.MemoryRequirements(invalidBatchConfig, requirements), "reject invalid update batch configuration")
+Local invalidMessageConfig:SReplicationConfig = config
+invalidMessageConfig.maxMessageBytes = 1200
+Check(Not TReplicationWorld.MemoryRequirements(invalidMessageConfig, requirements), "reject message payload larger than packet capacity")
 
 Local authority:TReplicationWorld = TReplicationWorld.CreateAuthority(hostSession, config)
 Local replica:TReplicationWorld = TReplicationWorld.CreateReplica(clientSession, config)
@@ -192,6 +202,24 @@ Check(remote.GetString(FIELD_NAME) = "Blåbær", "replicate UTF-8 string")
 Check(Not remote.SetFloat32(FIELD_X, 99.0), "replica entity is read-only")
 Check(Not remote.SetPriority(UInt(EReplicationPriority.High)), "replica cannot change scheduling priority")
 Check(replica.EntityAt(Int(remote.Identity().Id()) - 1) = remote, "enumerate fixed entity slots")
+
+Local messageBytes:Byte[3]
+messageBytes[0] = 17
+messageBytes[1] = 34
+messageBytes[2] = 51
+Local messagePayload:SPacketView = New SPacketView(Byte Ptr(messageBytes), Size_T(messageBytes.Length))
+Check(authority.SendMessage(player, 900, messagePayload, 10) = ETransportResult.Ok, "send authority entity message")
+RouteReplication(clientSession, replica, 10)
+Check(PollMessageEvent(replica, 900, event), "receive authority entity message")
+Check(event.Entity() = remote And event.Peer().Equals(clientPeer), "report authority message target and peer")
+Check(event.Payload().Length() = 3 And event.Payload().Data()[0] = 17 And event.Payload().Data()[2] = 51, "copy authority message payload")
+Check(replica.SendMessage(remote, 901, messagePayload, 10) = ETransportResult.Ok, "send replica entity message")
+RouteReplication(hostSession, authority, 10)
+Check(PollMessageEvent(authority, 901, event), "receive replica entity message")
+Check(event.Entity() = player And event.Peer().Equals(hostPeer), "report replica message target and peer")
+Check(event.Payload().Length() = 3 And event.Payload().Data()[1] = 34, "copy replica message payload")
+Local oversizedMessage:Byte[257]
+Check(authority.SendMessage(player, 902, New SPacketView(Byte Ptr(oversizedMessage), Size_T(oversizedMessage.Length)), 10) = ETransportResult.PacketTooLarge, "reject oversized entity message")
 
 Check(authority.RemovePeer(hostPeer), "remove authority peer")
 Check(authority.AddPeer(hostPeer, 10) = ETransportResult.Ok, "send complete late-join state")

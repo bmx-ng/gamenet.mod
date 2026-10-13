@@ -48,7 +48,8 @@ Transport-independent building blocks for real-time multiplayer games.
   fields or periodic full unreliable snapshots, late-join state, schema
   compatibility checks, bounded custom field codecs, per-peer relevance, and
   bounded update batching with traffic diagnostics, priority scheduling,
-  per-peer byte budgets, and complete-state catch-up above a session.
+  per-peer byte budgets, complete-state catch-up, and bounded bidirectional
+  entity messages above a session.
 - `GameNet.Rollback` optionally stores deterministic frame state and predicted
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a

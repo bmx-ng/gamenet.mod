@@ -184,6 +184,35 @@ reports successful complete-state repairs. If a complete entity update is
 larger than its configured budget, increase that budget or reduce the schema's
 maximum encoded state size.
 
+## One-shot entity messages
+
+Replicated fields describe durable state. Short-lived actions such as firing a
+weapon, interacting with an object, requesting an ability, or triggering an
+effect can instead use a bounded entity message:
+
+```blitzmax
+Local writer:SPacketWriter = New SPacketWriter(buffer, bufferSize)
+writer.WriteUInt32(weaponId)
+writer.WriteFloat32(direction)
+
+world.SendMessage(player, MSG_FIRE, writer.View(), tick)
+```
+
+On a replica, `SendMessage` sends to the bound authority. On an authority it
+sends to every peer which currently knows the entity;
+`SendMessageToPeer` selects one such peer. Reliable ordered delivery is the
+default, while disposable effects may explicitly request unreliable delivery.
+The receiving world reports a `Message` event containing the entity, message
+identifier, originating peer, tick, and payload.
+
+Message bytes are application-defined rather than part of an entity schema.
+The authority should validate every client message according to game rules;
+entity ownership metadata is reported but is not treated as authorization.
+`maxMessageBytes` defaults to 256. The world reserves that many native bytes
+for every event-queue slot and copies incoming data there, avoiding dependence
+on a borrowed transport packet. An event payload view remains valid until its
+queue slot is reused or the world is closed.
+
 ## Custom field codecs
 
 The built-in typed fields remain the simplest option. A bounded codec can be

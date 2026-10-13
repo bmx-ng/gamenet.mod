@@ -28,7 +28,7 @@ ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 ModuleInfo "History: 0.1 Initial Steam Networking Messages transport"
 
-?Not android And Not ios
+?bmxng2 And Not android And Not ios
 
 Import GameNet.Core
 Import Steam.SteamSDK

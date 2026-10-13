@@ -13,23 +13,36 @@ Module GameNet.SteamOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.2"
+ModuleInfo "Version: 0.3"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
+ModuleInfo "History: 0.3 Added an optional Steam Networking Sockets transport"
 ModuleInfo "History: 0.2 Added a testable Steam backend boundary and provider flow tests"
 ModuleInfo "History: 0.1 Initial Steam lobby provider"
 
-?Not android And Not ios
+?bmxng2 And Not android And Not ios
 
 Import GameNet.Online
 Import GameNet.Steam
+Import GameNet.SteamSockets
 Import Steam.SteamSDK
 
 Const STEAM_ONLINE_EVENT_CAPACITY:Int = 64
 Const STEAM_ONLINE_NAME_KEY:String = "gamenet.name"
 Const STEAM_ONLINE_START_KEY:String = "gamenet.start"
 Const STEAM_ONLINE_JOINABLE_KEY:String = "gamenet.joinable"
+
+Rem
+bbdoc: Steam networking implementation used for a lobby match.
+about: NetworkingMessages preserves the original peer-message transport.
+NetworkingSockets gives the lobby owner a P2P listen socket and connects every
+other member to it through Steam's connection-oriented networking API.
+End Rem
+Enum ESteamOnlineTransportKind:Byte
+	NetworkingMessages
+	NetworkingSockets
+End Enum
 
 Rem
 bbdoc: Steam operations consumed by #TSteamOnlineService.
@@ -62,7 +75,7 @@ Interface ISteamOnlineBackend
 	Method JoinLobby(lobbyId:ULong)
 	Method LeaveLobby(lobbyId:ULong)
 	Method ShowInviteDialog(lobbyId:ULong)
-	Method CreateTransport:INetTransport(steamIds:ULong[], channelCount:Int, maxPacketSize:Size_T)
+	Method CreateTransport:INetTransport(steamIds:ULong[], host:Int, channelCount:Int, maxPacketSize:Size_T)
 End Interface
 
 Private
@@ -73,6 +86,11 @@ Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 	Field apps:TSteamApps
 	Field friends:TSteamFriends
 	Field matchmaking:TSteamMatchmaking
+	Field transportKind:ESteamOnlineTransportKind
+
+	Method New(transportKind:ESteamOnlineTransportKind)
+		Self.transportKind = transportKind
+	End Method
 
 	Method Initialize:Int()
 		If Not SteamInit(False) Then Return False
@@ -176,7 +194,14 @@ Type TNativeSteamOnlineBackend Implements ISteamOnlineBackend
 	Method ShowInviteDialog(lobbyId:ULong)
 		If friends Then friends.ActivateGameOverlayInviteDialog(lobbyId)
 	End Method
-	Method CreateTransport:INetTransport(steamIds:ULong[], channelCount:Int, maxPacketSize:Size_T)
+	Method CreateTransport:INetTransport(steamIds:ULong[], host:Int, channelCount:Int, maxPacketSize:Size_T)
+		If transportKind = ESteamOnlineTransportKind.NetworkingSockets Then
+			If host Then
+				Return TSteamSocketsTransport.ListenP2P(0, steamIds.Length, channelCount, maxPacketSize)
+			End If
+			If steamIds.Length <> 1 Then Return Null
+			Return TSteamSocketsTransport.ConnectP2P(steamIds[0], 0, channelCount, maxPacketSize)
+		End If
 		Return TSteamTransport.Create(steamIds, channelCount, maxPacketSize)
 	End Method
 End Type
@@ -344,7 +369,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		Else
 			remoteIds = [ownerId]
 		End If
-		_readyTransport = _backend.CreateTransport(remoteIds, _channelCount, _maxPacketSize)
+		_readyTransport = _backend.CreateTransport(remoteIds, host, _channelCount, _maxPacketSize)
 		If Not _readyTransport Then
 			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.StartMatch, requestId, EOnlineError.ProviderFailure, 0, String(_currentLobbyId), New SOnlinePlayer, "Could not create Steam transport"))
 			_startRequestId = 0
@@ -359,9 +384,9 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	End Method
 
 	Public
-	Function Create:TSteamOnlineService(channelCount:Int = 4, maxPacketSize:Size_T = STEAM_DEFAULT_MAX_PACKET_SIZE)
+	Function Create:TSteamOnlineService(channelCount:Int = 4, maxPacketSize:Size_T = STEAM_DEFAULT_MAX_PACKET_SIZE, transportKind:ESteamOnlineTransportKind = ESteamOnlineTransportKind.NetworkingMessages)
 		If channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Then Return Null
-		Return New TSteamOnlineService(New TNativeSteamOnlineBackend, channelCount, maxPacketSize)
+		Return New TSteamOnlineService(New TNativeSteamOnlineBackend(transportKind), channelCount, maxPacketSize)
 	End Function
 
 	Rem

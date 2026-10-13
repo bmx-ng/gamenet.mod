@@ -33,6 +33,12 @@ the backends operationally identical: GameKit supplies Apple matchmaking and
 connectivity, while an Internet ENet game still needs a plan for discovery,
 NAT traversal, relays or dedicated servers.
 
+`GameNet.SteamSockets` is another transport choice for desktop games. It can
+listen or connect using Steam identities, or use numeric IP addresses for an
+ordinary hosted server. A dedicated server can run the same `GameNet.Session`
+and authoritative-session code as an ENet server; Steam game-server login,
+advertisement, and player authentication are optional surrounding services.
+
 ## Decide how players find the match
 
 Two devices do not need an online service merely because they are playing a
@@ -57,9 +63,11 @@ require `GameNet.Online`.
 
 `GameNet.SteamOnline` is the first lobby-oriented provider. It maps Steam lobby
 metadata and membership into `IOnlineLobby`, uses the lobby owner as the
-GameNet session host, and yields a `GameNet.Steam` peer transport when the
-match starts. Steam lobby discovery and Steam Networking Messages remain
-separate underneath, matching the service/transport split in GameNet.
+GameNet session host, and yields a Steam peer transport when the match starts.
+Networking Messages remains the compatibility default; a game can instead ask
+the provider for Networking Sockets, making the lobby owner a P2P listener and
+connecting the remaining members to it. Steam lobby discovery stays separate
+from either transport, matching the service/transport split in GameNet.
 
 ## Plan packet sizes rather than relying on fragmentation
 

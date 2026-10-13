@@ -16,6 +16,8 @@ Transport-independent building blocks for real-time multiplayer games.
   automatching to `GameNet.Online`, yielding a `GameNet.GameKit` transport.
 - `GameNet.Steam` adapts Steam Networking Messages to the common transport
   contract on desktop targets.
+- `GameNet.SteamSockets` provides connection-oriented Steam P2P and direct IP
+  transports for peer-hosted and dedicated-server games.
 - `GameNet.SteamOnline` implements online identity, searchable lobbies,
   invitations, lobby ownership, and match startup with Steam.
 - `GameNet.Online` defines an optional common contract for online identity,
@@ -93,3 +95,9 @@ matchmaking into a playable two-player fixed-point rollback game with touch and
 keyboard input, destructible shields, power returns, deterministic collisions,
 state hashes, full-state recovery, confirmed effects, and a transport-neutral
 `GameNet.Match` lifecycle for ready-up, countdown, completion, and rematches.
+
+[`examples/steam_sockets_ip`](examples/steam_sockets_ip) verifies a Steam
+Networking Sockets connection and packet exchange over local IP. The companion
+[`examples/steam_sockets_dedicated`](examples/steam_sockets_dedicated) shows a
+bounded-duration headless echo server with Steam game-server login,
+advertisement, orderly shutdown, and a normal GameNet transport.

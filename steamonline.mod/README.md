@@ -3,7 +3,15 @@
 `GameNet.SteamOnline` implements the optional `GameNet.Online` service contract
 with Steam lobbies. It supports local identity, lobby creation and discovery,
 joining and leaving, invitations, lobby metadata, and handing a connected
-`GameNet.Steam` transport to the game.
+GameNet transport to the game. `TSteamOnlineService.Create` uses
+`GameNet.Steam` Networking Messages by default for compatibility. Passing
+`ESteamOnlineTransportKind.NetworkingSockets` selects the connection-oriented
+`GameNet.SteamSockets` backend instead.
+
+With Networking Sockets, the lobby owner creates a P2P listener and the other
+members connect to the owner's Steam identity. Steam can negotiate direct or
+relayed routes; the game continues to receive the same `INetTransport` from
+`TakeMatchTransport`.
 
 Invitations are reported both when Steam delivers them to a running game and
 when accepting one launches the game with `+connect_lobby`. The application

@@ -54,6 +54,7 @@ Type TMockSteamOnlineBackend Implements ISteamOnlineBackend
 	Field inviteDialogLobbyId:ULong
 	Field searchLobbyIds:ULong[] = [ULong(500)]
 	Field transportIds:ULong[] = New ULong[0]
+	Field transportHost:Int
 	Field transport:TMockTransport
 	Field pumpCount:Int
 	Field commandLine:String
@@ -149,8 +150,9 @@ Type TMockSteamOnlineBackend Implements ISteamOnlineBackend
 	Method ShowInviteDialog(id:ULong)
 		inviteDialogLobbyId = id
 	End Method
-	Method CreateTransport:INetTransport(steamIds:ULong[], channelCount:Int, maxPacketSize:Size_T)
+	Method CreateTransport:INetTransport(steamIds:ULong[], host:Int, channelCount:Int, maxPacketSize:Size_T)
 		transportIds = steamIds[..]
+		transportHost = host
 		transport = New TMockTransport
 		Return transport
 	End Method
@@ -191,6 +193,7 @@ Local info:SOnlineMatchInfo
 Check(event.RequestId() = startRequest And host.MatchInfo(startRequest, info), "publish host match")
 Check(info.IsSessionHost() And info.PlayerCount() = 2, "host match information")
 Check(hostBackend.transportIds.Length = 1 And hostBackend.transportIds[0] = 20, "host transport contains remote members")
+Check(hostBackend.transportHost, "identify host when creating transport")
 Check(host.TakeMatchTransport(startRequest) <> Null, "take host transport")
 
 ' Exercise discovery and the joined-client start signal.
@@ -222,6 +225,7 @@ event = NextEvent(client, EOnlineEventKind.MatchReady)
 Check(client.MatchInfo(startRequest, info) And Not info.IsSessionHost(), "publish client match")
 Check(info.SessionHostPeer().IsValid(), "identify client session host")
 Check(clientBackend.transportIds.Length = 1 And clientBackend.transportIds[0] = 10, "client transport targets lobby owner")
+Check(Not clientBackend.transportHost, "identify client when creating transport")
 
 client.OnLobbyInvite(30, 700, 0)
 event = NextEvent(client, EOnlineEventKind.InvitationReceived)

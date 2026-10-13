@@ -43,6 +43,9 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.AuthoritativeSession` composes bounded prediction and snapshot
   storage into reusable client/server orchestration with redundant input,
   acknowledgement, reconciliation, interpolation, and adaptive render delay.
+- `GameNet.Replication` provides a GNet-style schema and replicated-entity
+  facade with stable identities, typed fields, ownership, reliable changed
+  fields, late-join state, and bounded lifecycle events above a session.
 - `GameNet.Rollback` optionally stores deterministic frame state and predicted
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a

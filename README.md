@@ -19,7 +19,8 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.SteamSockets` provides connection-oriented Steam P2P and direct IP
   transports for peer-hosted and dedicated-server games.
 - `GameNet.SteamOnline` implements online identity, searchable lobbies,
-  invitations, lobby ownership, and match startup with Steam.
+  invitations, lobby ownership, peer-hosted match startup, and routing lobby
+  members to a known dedicated server with Steam.
 - `GameNet.Online` defines an optional common contract for online identity,
   lobbies, invitations, matchmaking, and handing a connected transport to a
   game. Service adapters can target GameKit, Steam, Nakama, EOS, or future

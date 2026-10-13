@@ -8,7 +8,7 @@ Import BRL.PolledInput
 Const APP_ID:UInt = $53544541 ' STEA
 Const APP_VERSION:UInt = 1
 
-Global steamOnline:TSteamOnlineService = TSteamOnlineService.Create(2, 900)
+Global steamOnline:TSteamOnlineService = TSteamOnlineService.Create(2, 900, ESteamOnlineTransportKind.NetworkingSockets)
 Global online:IOnlineService = steamOnline
 Global statusText:String = "Starting Steam..."
 Global detailText:String = ""

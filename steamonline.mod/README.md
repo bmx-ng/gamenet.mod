@@ -13,6 +13,13 @@ members connect to the owner's Steam identity. Steam can negotiate direct or
 relayed routes; the game continues to receive the same `INetTransport` from
 `TakeMatchTransport`.
 
+Alternatively, the lobby owner can call `SetDedicatedServer` with a known
+numeric IPv4 endpoint or a Steam game-server identity before starting the
+match. Steam publishes that assignment through the lobby. Every member,
+including the owner, then receives a client transport whose session-host peer
+is the dedicated server. Discovering or allocating that machine remains an
+external concern; the service does not pretend to supply hosting.
+
 Invitations are reported both when Steam delivers them to a running game and
 when accepting one launches the game with `+connect_lobby`. The application
 decides when to call `AcceptInvitation`, so it can show its own confirmation or
@@ -24,9 +31,11 @@ player ID. Automatic queue-based matchmaking is not implemented in this first
 provider; `StartMatchmaking` returns zero. Games can create/find lobbies or add
 a separate ticket-based coordinator later without changing the transport.
 
-The Steam lobby owner is the GameNet session host. Calling `StartMatch` as the
-owner closes the lobby to new members and marks it started; joined clients that
-have also requested `StartMatch` then receive their own `MatchReady` event.
+For a peer-hosted match, the Steam lobby owner is the GameNet session host. For
+a dedicated match, every lobby member is a client. Calling `StartMatch` as the
+lobby owner closes the lobby to new members and marks it started; joined
+clients that have also requested `StartMatch` then receive their own
+`MatchReady` event.
 
 The provider initializes Steam callback processing in manual mode and pumps it
 from `Pump`. It does not shut down the process-wide Steam API when closed,

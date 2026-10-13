@@ -109,9 +109,9 @@ world.SetPeerVisible(localPlayer, peer, True, tick)
 `SetPeerDefaultVisible` changes the policy for subsequently spawned entities
 without changing the visibility of entities which already exist.
 
-The authority reserves two bytes per entity/peer pair for intended and known
-visibility. This is included in `MemoryRequirements` and does not allocate
-during ordinary relevance changes.
+The authority reserves three bytes per entity/peer pair for intended and known
+visibility plus pending complete-state catch-up. This is included in
+`MemoryRequirements` and does not allocate during ordinary relevance changes.
 
 ## Update batching and traffic measurement
 
@@ -144,6 +144,45 @@ outside it.
 Batching does not change delivery semantics. Reliable changed fields and
 unreliable full snapshots are placed into separate packets, and relevance is
 evaluated independently for every peer.
+
+## Priority and byte budgets
+
+Busy worlds can cap ordinary state traffic independently for each peer and
+delivery policy. A zero budget retains the default unlimited behaviour:
+
+```blitzmax
+config.reliableUpdateBudgetPerPeer = 800
+config.snapshotUpdateBudgetPerPeer = 1000
+```
+
+The same limits can be adjusted at runtime with `SetUpdateBudgets`. Packet
+framing counts toward each limit. Reliable spawn, despawn, reveal, hide, and
+ownership messages remain outside these update budgets so an entity's
+lifecycle cannot be stranded behind ordinary movement traffic. Consequently,
+the total `LastFlushBytes` may exceed one budget when a flush also carries
+lifecycle traffic, multiple peers, or both delivery policies.
+
+When every pending update does not fit, the authority sends higher-priority
+entities first:
+
+```blitzmax
+localPlayer.SetPriority(UInt(EReplicationPriority.Critical))
+projectile.SetPriority(UInt(EReplicationPriority.High))
+scenery.SetPriority(UInt(EReplicationPriority.Low))
+```
+
+Priorities accept any value from 0 through 255; the enum provides convenient
+common values. Equal-priority traversal rotates between flushes so a low slot
+number does not win every time.
+
+A deferred or transport-failed peer update is not retained as an obsolete
+delta. GameNet records bounded per-peer catch-up state and later sends every
+field from the entity's current state. This allows newer changes to coalesce
+while guaranteeing that a peer which becomes writable again is repaired.
+`LastFlushDeferredUpdates` reports budget deferrals and `LastFlushCatchups`
+reports successful complete-state repairs. If a complete entity update is
+larger than its configured budget, increase that budget or reduce the schema's
+maximum encoded state size.
 
 ## Custom field codecs
 

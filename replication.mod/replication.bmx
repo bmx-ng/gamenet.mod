@@ -25,11 +25,12 @@ Module GameNet.Replication
 
 ?bmxng2
 
-ModuleInfo "Version: 0.4"
+ModuleInfo "Version: 0.5"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
+ModuleInfo "History: 0.5 Add bounded update batching and flush traffic diagnostics"
 ModuleInfo "History: 0.4 Add bounded per-peer entity relevance"
 ModuleInfo "History: 0.3 Add bounded application field codecs"
 ModuleInfo "History: 0.2 Add schema fingerprints, memory sizing, and periodic unreliable snapshots"
@@ -40,7 +41,7 @@ Import GameNet.Session
 
 Private
 
-Const REPLICATION_PROTOCOL_VERSION:UInt = 2
+Const REPLICATION_PROTOCOL_VERSION:UInt = 3
 Const REPLICATION_MINIMUM_PACKET_SIZE:Size_T = 32
 
 Function ReplicationHashByte:ULong(hash:ULong, value:UInt)
@@ -59,6 +60,7 @@ Enum EReplicationPacketKind:Byte
 	Update
 	Despawn
 	Ownership
+	UpdateBatch
 End Enum
 
 Public
@@ -630,6 +632,9 @@ Rem
 bbdoc: Configuration for a bounded replicated entity world.
 about: Set codecCapacity to the largest custom field payload accepted by any
 registered schema. Leave it at zero when custom field codecs are not used.
+maxUpdatesPerBatch limits the entities combined into one update packet; one
+disables batching. updateBatchCapacity limits a batch packet and defaults to
+packetCapacity when zero.
 End Rem
 Struct SReplicationConfig
 	Field maxEntities:Int
@@ -641,8 +646,10 @@ Struct SReplicationConfig
 	Field messageType:UInt
 	Field channel:UInt
 	Field codecCapacity:Size_T
+	Field maxUpdatesPerBatch:Int
+	Field updateBatchCapacity:Size_T
 
-	Method New(maxEntities:Int = 1024, maxSchemas:Int = 64, maxPeers:Int = 16, maxFieldsPerSchema:Int = 64, eventCapacity:Int = 256, packetCapacity:Size_T = 1200, messageType:UInt = 70, channel:UInt = 0, codecCapacity:Size_T = 0)
+	Method New(maxEntities:Int = 1024, maxSchemas:Int = 64, maxPeers:Int = 16, maxFieldsPerSchema:Int = 64, eventCapacity:Int = 256, packetCapacity:Size_T = 1200, messageType:UInt = 70, channel:UInt = 0, codecCapacity:Size_T = 0, maxUpdatesPerBatch:Int = 64, updateBatchCapacity:Size_T = 0)
 		Self.maxEntities = maxEntities
 		Self.maxSchemas = maxSchemas
 		Self.maxPeers = maxPeers
@@ -652,6 +659,8 @@ Struct SReplicationConfig
 		Self.messageType = messageType
 		Self.channel = channel
 		Self.codecCapacity = codecCapacity
+		Self.maxUpdatesPerBatch = maxUpdatesPerBatch
+		Self.updateBatchCapacity = updateBatchCapacity
 	End Method
 End Struct
 
@@ -724,6 +733,12 @@ Type TReplicationWorld
 	Field _hasAuthorityPeer:Int
 	Field _packetBuffer:Byte Ptr
 	Field _codecBuffer:Byte Ptr
+	Field _updateBuffer:Byte Ptr
+	Field _sendCapacity:Size_T
+	Field _batchCapacity:Size_T
+	Field _batchEntities:Int[]
+	Field _flushUpdate:Byte[]
+	Field _flushFailed:Byte[]
 	Field _decoded:SDecodedReplicationField[]
 	Field _decodedSeen:Byte[]
 	Field _events:SReplicationEvent[]
@@ -734,6 +749,9 @@ Type TReplicationWorld
 	Field _rejectedPackets:Int
 	Field _lastFailure:EReplicationFailure
 	Field _writeFailure:EReplicationFailure
+	Field _measuringFlush:Int
+	Field _lastFlushPackets:Int
+	Field _lastFlushBytes:Size_T
 
 	Method New(session:TNetSession, role:EReplicationRole, config:SReplicationConfig)
 		_session = session
@@ -749,6 +767,13 @@ Type TReplicationWorld
 		_peerKnown = New Byte[config.maxEntities * config.maxPeers]
 		_packetBuffer = MemAlloc(config.packetCapacity)
 		If config.codecCapacity Then _codecBuffer = MemAlloc(config.codecCapacity)
+		_updateBuffer = MemAlloc(config.packetCapacity)
+		_sendCapacity = EffectiveSendCapacity(session, config)
+		_batchCapacity = config.updateBatchCapacity
+		If _batchCapacity = 0 Or _batchCapacity > _sendCapacity Then _batchCapacity = _sendCapacity
+		_batchEntities = New Int[config.maxUpdatesPerBatch]
+		_flushUpdate = New Byte[config.maxEntities]
+		_flushFailed = New Byte[config.maxEntities]
 		_decoded = New SDecodedReplicationField[config.maxFieldsPerSchema]
 		_decodedSeen = New Byte[config.maxFieldsPerSchema]
 		_events = New SReplicationEvent[config.eventCapacity]
@@ -760,12 +785,24 @@ Type TReplicationWorld
 		If config.maxFieldsPerSchema < 1 Or config.maxFieldsPerSchema > 65535 Then Return False
 		If config.eventCapacity < 1 Or config.packetCapacity < REPLICATION_MINIMUM_PACKET_SIZE Then Return False
 		If config.codecCapacity > 65535 Then Return False
+		If config.maxUpdatesPerBatch < 1 Or config.maxUpdatesPerBatch > 65535 Then Return False
+		If config.updateBatchCapacity And (config.updateBatchCapacity < REPLICATION_MINIMUM_PACKET_SIZE Or config.updateBatchCapacity > config.packetCapacity) Then Return False
 		If config.messageType > 65535 Then Return False
 		Return True
 	End Function
 
 	Function ValidConfig:Int(session:TNetSession, config:SReplicationConfig)
-		Return session <> Null And ValidConfigValues(config)
+		If Not session Or Not ValidConfigValues(config) Then Return False
+		Return EffectiveSendCapacity(session, config) >= REPLICATION_MINIMUM_PACKET_SIZE
+	End Function
+
+	Function EffectiveSendCapacity:Size_T(session:TNetSession, config:SReplicationConfig)
+		Local capacity:Size_T = config.packetCapacity
+		Local reliableLimit:Size_T = session.MaxPayloadSize(EDeliveryMode.ReliableOrdered)
+		Local unreliableLimit:Size_T = session.MaxPayloadSize(EDeliveryMode.Unreliable)
+		If reliableLimit And reliableLimit < capacity Then capacity = reliableLimit
+		If unreliableLimit And unreliableLimit < capacity Then capacity = unreliableLimit
+		Return capacity
 	End Function
 
 	Method Fail(failure:EReplicationFailure, entity:TReplicatedEntity = Null, tick:UInt = 0)
@@ -821,15 +858,6 @@ Type TReplicationWorld
 			If Not _peerUsed[peerIndex] Then Continue
 			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
 			If _peerVisible[relevanceIndex] <> _peerKnown[relevanceIndex] Then Return True
-		Next
-		Return False
-	End Method
-
-	Method HasRelevantRecipients:Int(entityIndex:Int)
-		For Local peerIndex:Int = 0 Until _peers.Length
-			If Not _peerUsed[peerIndex] Then Continue
-			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
-			If _peerVisible[relevanceIndex] And _peerKnown[relevanceIndex] Then Return True
 		Next
 		Return False
 	End Method
@@ -895,7 +923,7 @@ Type TReplicationWorld
 
 	Method WriteSpawn:Size_T(entity:TReplicatedEntity, tick:UInt)
 		_writeFailure = EReplicationFailure.None
-		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
+		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _sendCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Spawn))
 		writer.WriteUInt32(tick)
@@ -909,21 +937,30 @@ Type TReplicationWorld
 		Return writer.Position()
 	End Method
 
-	Method WriteUpdate:Size_T(entity:TReplicatedEntity, tick:UInt, allFields:Int)
+	Method WriteUpdateBody:Size_T(entity:TReplicatedEntity, allFields:Int)
 		_writeFailure = EReplicationFailure.None
-		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
-		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
-		writer.WriteUInt8(UInt(EReplicationPacketKind.Update))
-		writer.WriteUInt32(tick)
+		Local writer:SPacketWriter = New SPacketWriter(_updateBuffer, _sendCapacity)
 		writer.WriteUInt32(entity._identity.Id())
 		writer.WriteUInt32(entity._identity.Generation())
 		If Not WriteFields(writer, entity, allFields) Then Return 0
 		Return writer.Position()
 	End Method
 
+	Method WriteUpdate:Size_T(entity:TReplicatedEntity, tick:UInt, allFields:Int)
+		Local bodyLength:Size_T = WriteUpdateBody(entity, allFields)
+		If bodyLength = 0 Then Return 0
+		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _sendCapacity)
+		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
+		writer.WriteUInt8(UInt(EReplicationPacketKind.Update))
+		writer.WriteUInt32(tick)
+		writer.WriteBytes(_updateBuffer, bodyLength)
+		If writer.Failed() Then Return 0
+		Return writer.Position()
+	End Method
+
 	Method WriteDespawn:Size_T(entity:TReplicatedEntity, tick:UInt, reason:Int)
 		_writeFailure = EReplicationFailure.None
-		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
+		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _sendCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Despawn))
 		writer.WriteUInt32(tick)
@@ -936,7 +973,7 @@ Type TReplicationWorld
 
 	Method WriteOwnership:Size_T(entity:TReplicatedEntity, tick:UInt)
 		_writeFailure = EReplicationFailure.None
-		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
+		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _sendCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Ownership))
 		writer.WriteUInt32(tick)
@@ -958,7 +995,12 @@ Type TReplicationWorld
 
 	Method SendToPeer:ETransportResult(peer:SNetPeer, length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
 		If length = 0 Then Return ReportWriteFailure()
-		Return _session.Send(peer, _config.messageType, _config.channel, delivery, _packetBuffer, length)
+		Local result:ETransportResult = _session.Send(peer, _config.messageType, _config.channel, delivery, _packetBuffer, length)
+		If _measuringFlush And result = ETransportResult.Ok Then
+			_lastFlushPackets :+ 1
+			_lastFlushBytes :+ length
+		End If
+		Return result
 	End Method
 
 	Method SendToRelevant:ETransportResult(entityIndex:Int, length:Size_T, delivery:EDeliveryMode)
@@ -971,6 +1013,105 @@ Type TReplicationWorld
 			Local sent:ETransportResult = SendToPeer(_peers[peerIndex], length, delivery)
 			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
 		Next
+		Return result
+	End Method
+
+	Method BeginUpdateBatch(writer:SPacketWriter Var, tick:UInt)
+		writer = New SPacketWriter(_packetBuffer, _batchCapacity)
+		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
+		writer.WriteUInt8(UInt(EReplicationPacketKind.UpdateBatch))
+		writer.WriteUInt32(tick)
+		writer.WriteUInt16(0)
+	End Method
+
+	Method FlushUpdateBatch:ETransportResult(peer:SNetPeer, writer:SPacketWriter Var, count:Int, delivery:EDeliveryMode)
+		If count = 0 Then Return ETransportResult.Ok
+		_packetBuffer[6] = Byte(UInt(count) Shr 8)
+		_packetBuffer[7] = Byte(UInt(count))
+		Local result:ETransportResult = SendToPeer(peer, writer.Position(), delivery)
+		If result <> ETransportResult.Ok Then
+			For Local index:Int = 0 Until count
+				_flushFailed[_batchEntities[index]] = True
+			Next
+		End If
+		Return result
+	End Method
+
+	Method SendSingleUpdate:ETransportResult(peer:SNetPeer, entity:TReplicatedEntity, entityIndex:Int, tick:UInt, allFields:Int, delivery:EDeliveryMode)
+		Local length:Size_T = WriteUpdate(entity, tick, allFields)
+		If length = 0 Then
+			_flushFailed[entityIndex] = True
+			Return ReportWriteFailure()
+		End If
+		If length > _batchCapacity Then
+			_flushFailed[entityIndex] = True
+			Fail(EReplicationFailure.PacketTooLarge, entity, tick)
+			Return ETransportResult.PacketTooLarge
+		End If
+		Local result:ETransportResult = SendToPeer(peer, length, delivery)
+		If result <> ETransportResult.Ok Then _flushFailed[entityIndex] = True
+		Return result
+	End Method
+
+	Method SendUpdateBatches:ETransportResult(peerIndex:Int, tick:UInt, delivery:EDeliveryMode)
+		Local result:ETransportResult = ETransportResult.Ok
+		Local peer:SNetPeer = _peers[peerIndex]
+		If _config.maxUpdatesPerBatch = 1 Then
+			For Local entityIndex:Int = 0 Until _entities.Length
+				If Not _flushUpdate[entityIndex] Then Continue
+				Local entity:TReplicatedEntity = _entities[entityIndex]
+				Local snapshot:Int = entity._schema.UpdateMode() = EReplicationUpdateMode.UnreliableSnapshots
+				If (delivery = EDeliveryMode.Unreliable) <> snapshot Then Continue
+				Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+				If Not _peerVisible[relevanceIndex] Or Not _peerKnown[relevanceIndex] Then Continue
+				Local sent:ETransportResult = SendSingleUpdate(peer, entity, entityIndex, tick, snapshot, delivery)
+				If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+			Next
+			Return result
+		End If
+
+		Local writer:SPacketWriter
+		BeginUpdateBatch(writer, tick)
+		Local count:Int
+		For Local entityIndex:Int = 0 Until _entities.Length
+			If Not _flushUpdate[entityIndex] Then Continue
+			Local entity:TReplicatedEntity = _entities[entityIndex]
+			Local snapshot:Int = entity._schema.UpdateMode() = EReplicationUpdateMode.UnreliableSnapshots
+			If (delivery = EDeliveryMode.Unreliable) <> snapshot Then Continue
+			Local relevanceIndex:Int = RelevanceIndex(entityIndex, peerIndex)
+			If Not _peerVisible[relevanceIndex] Or Not _peerKnown[relevanceIndex] Then Continue
+
+			Local bodyLength:Size_T = WriteUpdateBody(entity, snapshot)
+			If bodyLength = 0 Then
+				Local flushed:ETransportResult = FlushUpdateBatch(peer, writer, count, delivery)
+				If result = ETransportResult.Ok And flushed <> ETransportResult.Ok Then result = flushed
+				count = 0
+				BeginUpdateBatch(writer, tick)
+				_flushFailed[entityIndex] = True
+				Local failed:ETransportResult = ReportWriteFailure()
+				If result = ETransportResult.Ok Then result = failed
+				Continue
+			End If
+
+			If count = _batchEntities.Length Or bodyLength > 65535 Or writer.Remaining() < 2 Or bodyLength > writer.Remaining() - 2 Then
+				Local flushed:ETransportResult = FlushUpdateBatch(peer, writer, count, delivery)
+				If result = ETransportResult.Ok And flushed <> ETransportResult.Ok Then result = flushed
+				count = 0
+				BeginUpdateBatch(writer, tick)
+			End If
+			If bodyLength > 65535 Or writer.Remaining() < 2 Or bodyLength > writer.Remaining() - 2 Then
+				Local sent:ETransportResult = SendSingleUpdate(peer, entity, entityIndex, tick, snapshot, delivery)
+				If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+				BeginUpdateBatch(writer, tick)
+				Continue
+			End If
+			writer.WriteUInt16(UInt(bodyLength))
+			writer.WriteBytes(_updateBuffer, bodyLength)
+			_batchEntities[count] = entityIndex
+			count :+ 1
+		Next
+		Local flushed:ETransportResult = FlushUpdateBatch(peer, writer, count, delivery)
+		If result = ETransportResult.Ok And flushed <> ETransportResult.Ok Then result = flushed
 		Return result
 	End Method
 
@@ -1163,11 +1304,26 @@ Type TReplicationWorld
 		Local index:Int = ResolveEntityIndex(identity)
 		If index < 0 Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
 		Local entity:TReplicatedEntity = _entities[index]
+		If Not ParseFields(reader, entity._schema, fieldCount, False) Or fieldCount = 0 Then Return Reject(EReplicationFailure.InvalidPacket, entity, tick)
+		If reader.Remaining() <> 0 Then Return Reject(EReplicationFailure.InvalidPacket, entity, tick)
 		If Not ReplicationTickAfter(tick, entity._lastTick) Then Return True
-		If Not ParseFields(reader, entity._schema, fieldCount, False) Or fieldCount = 0 Or reader.Remaining() <> 0 Then Return Reject(EReplicationFailure.InvalidPacket, entity, tick)
 		ApplyFields(entity, fieldCount)
 		entity._lastTick = tick
 		QueueEvent(EReplicationEventKind.Updated, entity, tick)
+		Return True
+	End Method
+
+	Method ReceiveUpdateBatch:Int(reader:SPacketReader Var, tick:UInt)
+		Local count:UInt
+		If Not reader.ReadUInt16(count) Or count = 0 Or count > UInt(_entities.Length) Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
+		For Local index:Int = 0 Until Int(count)
+			Local bodyLength:UInt
+			If Not reader.ReadUInt16(bodyLength) Or Size_T(bodyLength) > reader.Remaining() Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
+			Local itemReader:SPacketReader = New SPacketReader(reader.RemainingView().Data(), Size_T(bodyLength))
+			If Not ReceiveUpdate(itemReader, tick) Then Return False
+			If Not reader.Skip(Size_T(bodyLength)) Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
+		Next
+		If reader.Remaining() <> 0 Then Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
 		Return True
 	End Method
 
@@ -1206,13 +1362,14 @@ Type TReplicationWorld
 	about: The managed estimate includes fixed world arrays and per-field arrays
 	for every entity slot. Runtime object and array headers, target objects, and
 	the variable UTF-8 contents of string fields are not included. Native bytes
-	include the packet buffer and optional codec scratch buffer.
+	include the packet and update staging buffers plus optional codec scratch.
 	End Rem
 	Function MemoryRequirements:Int(config:SReplicationConfig, requirements:SNetMemoryRequirements Var)
 		requirements = New SNetMemoryRequirements
 		If Not ValidConfigValues(config) Then Return False
 		Local nativeBytes:Size_T = config.packetCapacity
 		If Not NetAccumulateSize(nativeBytes, 1, config.codecCapacity) Then Return False
+		If Not NetAccumulateSize(nativeBytes, 1, config.packetCapacity) Then Return False
 		Local managedBytes:Size_T
 		Local entityCount:Size_T = Size_T(config.maxEntities)
 		Local schemaCount:Size_T = Size_T(config.maxSchemas)
@@ -1230,6 +1387,8 @@ Type TReplicationWorld
 		If Not NetAccumulateSize(managedBytes, eventCount, Size_T(SizeOf(SReplicationEvent))) Then Return False
 		If Not NetAccumulateSize(managedBytes, entityFields, Size_T(SizeOf(SReplicationValue) + SizeOf(Byte Null))) Then Return False
 		If Not NetAccumulateSize(managedBytes, relevanceSlots, 2) Then Return False
+		If Not NetAccumulateSize(managedBytes, entityCount, 2) Then Return False
+		If Not NetAccumulateSize(managedBytes, Size_T(config.maxUpdatesPerBatch), Size_T(SizeOf(Int Null))) Then Return False
 		Local totalBytes:Size_T = nativeBytes
 		If Not NetAccumulateSize(totalBytes, 1, managedBytes) Then Return False
 		requirements = New SNetMemoryRequirements(nativeBytes, managedBytes)
@@ -1256,6 +1415,20 @@ Type TReplicationWorld
 
 	Method Role:EReplicationRole()
 		Return _role
+	End Method
+
+	Rem
+	bbdoc: Returns the effective replication payload limit after session transport overhead.
+	End Rem
+	Method SendCapacity:Size_T()
+		Return _sendCapacity
+	End Method
+
+	Rem
+	bbdoc: Returns the effective maximum update-batch packet size.
+	End Rem
+	Method UpdateBatchCapacity:Size_T()
+		Return _batchCapacity
 	End Method
 
 	Method RegisterSchema:Int(schema:TReplicationSchema)
@@ -1434,45 +1607,54 @@ Type TReplicationWorld
 
 	Method Flush:ETransportResult(tick:UInt)
 		If _role <> EReplicationRole.Authority Then Return ETransportResult.Failed
+		_lastFlushPackets = 0
+		_lastFlushBytes = 0
+		_measuringFlush = True
 		Local result:ETransportResult = ETransportResult.Ok
+
+		For Local entityIndex:Int = 0 Until _entities.Length
+			_flushUpdate[entityIndex] = False
+			_flushFailed[entityIndex] = False
+			Local entity:TReplicatedEntity = _entities[entityIndex]
+			If Not entity Or Not entity._active Or entity._newlySpawned Then Continue
+			Select entity._schema.UpdateMode()
+				Case EReplicationUpdateMode.ReliableChanges
+					_flushUpdate[entityIndex] = entity.HasDirty()
+				Case EReplicationUpdateMode.UnreliableSnapshots
+					Local refreshDue:Int = entity._hasSent And UInt(tick - entity._lastSentTick) >= entity._schema.FullRefreshTicks()
+					_flushUpdate[entityIndex] = entity.HasDirty() Or refreshDue
+			End Select
+		Next
+
+		For Local peerIndex:Int = 0 Until _peers.Length
+			If Not _peerUsed[peerIndex] Then Continue
+			Local sent:ETransportResult = SendUpdateBatches(peerIndex, tick, EDeliveryMode.ReliableOrdered)
+			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+			sent = SendUpdateBatches(peerIndex, tick, EDeliveryMode.Unreliable)
+			If result = ETransportResult.Ok And sent <> ETransportResult.Ok Then result = sent
+		Next
+
 		For Local entityIndex:Int = 0 Until _entities.Length
 			Local entity:TReplicatedEntity = _entities[entityIndex]
 			If Not entity Or Not entity._active Then Continue
-			Local shouldUpdate:Int
-			Local allFields:Int
-			Local delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered
-			If Not entity._newlySpawned Then
-				Select entity._schema.UpdateMode()
-					Case EReplicationUpdateMode.ReliableChanges
-						shouldUpdate = entity.HasDirty()
-					Case EReplicationUpdateMode.UnreliableSnapshots
-						Local refreshDue:Int = entity._hasSent And UInt(tick - entity._lastSentTick) >= entity._schema.FullRefreshTicks()
-						shouldUpdate = entity.HasDirty() Or refreshDue
-						allFields = True
-						delivery = EDeliveryMode.Unreliable
-				End Select
-			End If
-			Local pendingVisibility:Int = HasPendingVisibility(entityIndex)
-			If Not entity._newlySpawned And Not shouldUpdate And Not pendingVisibility Then Continue
-
-			Local sent:ETransportResult = ETransportResult.Ok
-			If shouldUpdate And HasRelevantRecipients(entityIndex) Then sent = SendToRelevant(entityIndex, WriteUpdate(entity, tick, allFields), delivery)
-			If sent = ETransportResult.Ok Then
+			Local wasNew:Int = entity._newlySpawned
+			If wasNew Or HasPendingVisibility(entityIndex) Then
 				Local synchronized:ETransportResult = SynchronizeVisibility(entity, entityIndex, tick)
-				If synchronized <> ETransportResult.Ok Then sent = synchronized
-			End If
-			If sent = ETransportResult.Ok Then
-				entity._newlySpawned = False
-				If shouldUpdate Or entity.HasDirty() Then entity.ClearDirty()
-				If shouldUpdate Or entity._lastTick = 0 Then
-					entity._lastTick = tick
-					entity._lastSentTick = tick
-					entity._hasSent = True
+				If synchronized <> ETransportResult.Ok Then
+					_flushFailed[entityIndex] = True
+					If result = ETransportResult.Ok Then result = synchronized
 				End If
-			Else If result = ETransportResult.Ok Then
-				result = sent
+			End If
+			If _flushFailed[entityIndex] Then Continue
+			If wasNew Then entity._newlySpawned = False
+			If wasNew Or _flushUpdate[entityIndex] Then
+				entity.ClearDirty()
+				entity._lastTick = tick
+				entity._lastSentTick = tick
+				entity._hasSent = True
 			End If
 		Next
+		_measuringFlush = False
 		Return result
 	End Method
 
@@ -1523,6 +1705,8 @@ Type TReplicationWorld
 				Return ReceiveDespawn(reader, tick)
 			Case EReplicationPacketKind.Ownership
 				Return ReceiveOwnership(reader, tick)
+			Case EReplicationPacketKind.UpdateBatch
+				Return ReceiveUpdateBatch(reader, tick)
 		End Select
 		Return Reject(EReplicationFailure.InvalidPacket, Null, tick)
 	End Method
@@ -1547,6 +1731,20 @@ Type TReplicationWorld
 		Return _droppedEvents
 	End Method
 
+	Rem
+	bbdoc: Returns the number of successfully queued transport packets in the last #Flush.
+	End Rem
+	Method LastFlushPackets:Int()
+		Return _lastFlushPackets
+	End Method
+
+	Rem
+	bbdoc: Returns the replication payload bytes successfully queued by the last #Flush.
+	End Rem
+	Method LastFlushBytes:Size_T()
+		Return _lastFlushBytes
+	End Method
+
 	Method LastFailure:EReplicationFailure()
 		Return _lastFailure
 	End Method
@@ -1554,8 +1752,10 @@ Type TReplicationWorld
 	Method Close()
 		If _packetBuffer Then MemFree(_packetBuffer)
 		If _codecBuffer Then MemFree(_codecBuffer)
+		If _updateBuffer Then MemFree(_updateBuffer)
 		_packetBuffer = Null
 		_codecBuffer = Null
+		_updateBuffer = Null
 	End Method
 
 	Method Delete()

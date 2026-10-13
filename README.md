@@ -47,7 +47,7 @@ Transport-independent building blocks for real-time multiplayer games.
   facade with stable identities, typed fields, ownership, reliable changed
   fields or periodic full unreliable snapshots, late-join state, schema
   compatibility checks, bounded custom field codecs, per-peer relevance, and
-  lifecycle events above a session.
+  bounded update batching with traffic diagnostics above a session.
 - `GameNet.Rollback` optionally stores deterministic frame state and predicted
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a

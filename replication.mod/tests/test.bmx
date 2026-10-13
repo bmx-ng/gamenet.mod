@@ -114,10 +114,11 @@ Function DiscardSessionMessages(session:TNetSession, nowMillis:UInt)
 End Function
 
 Function PollEntityEvent:Int(world:TReplicationWorld, entity:TReplicatedEntity, kind:EReplicationEventKind, event:SReplicationEvent Var)
+	Local found:Int
 	While world.Poll(event)
-		If event.Entity() = entity And event.Kind() = kind Then Return True
+		If event.Entity() = entity And event.Kind() = kind Then found = True
 	Wend
-	Return False
+	Return found
 End Function
 
 Local pair:TLoopbackPair = TLoopbackPair.Create(64, 1200)
@@ -134,16 +135,19 @@ Check(hostSession.PollAt(sessionEvent, 0) And sessionEvent.Kind() = ESessionEven
 Check(clientSession.PollAt(sessionEvent, 0) And sessionEvent.Kind() = ESessionEventKind.Joined, "client joined")
 Local clientPeer:SNetPeer = sessionEvent.Peer()
 
-Local config:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1, 64)
+Local config:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1, 64, 2)
 Local requirements:SNetMemoryRequirements
 Check(TReplicationWorld.MemoryRequirements(config, requirements), "calculate replication memory requirements")
-Check(requirements.NativeBytes() = 1264 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
+Check(requirements.NativeBytes() = 2464 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
 Local invalidConfig:SReplicationConfig = New SReplicationConfig(0, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1)
 Check(Not TReplicationWorld.MemoryRequirements(invalidConfig, requirements), "reject invalid memory configuration")
+Local invalidBatchConfig:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1, 0, 0)
+Check(Not TReplicationWorld.MemoryRequirements(invalidBatchConfig, requirements), "reject invalid update batch configuration")
 
 Local authority:TReplicationWorld = TReplicationWorld.CreateAuthority(hostSession, config)
 Local replica:TReplicationWorld = TReplicationWorld.CreateReplica(clientSession, config)
 Check(authority <> Null And replica <> Null, "create replication worlds")
+Check(authority.SendCapacity() = 1192 And authority.UpdateBatchCapacity() = 1192, "clamp replication payload to session capacity")
 Local noCodecConfig:SReplicationConfig = New SReplicationConfig(1, 1, 1, 1, 4, 1200, REPLICATION_MESSAGE, 1)
 Local noCodecWorld:TReplicationWorld = TReplicationWorld.CreateAuthority(hostSession, noCodecConfig)
 Check(noCodecWorld <> Null And Not noCodecWorld.RegisterSchema(CreateCodecSchema()), "require configured codec scratch capacity")
@@ -294,8 +298,36 @@ remoteCodecEntity = event.Entity()
 remotePosition = TPositionState(remoteCodecEntity.GetCustom(FIELD_POSITION))
 Check(remotePosition.x = -14.0 And remotePosition.y = 6.5, "reveal complete current state")
 Check(remoteCodecEntity.Identity().Equals(codecEntity.Identity()), "reveal preserves stable identity")
+
+Check(authority.SetPeerVisible(snapshotEntity, hostPeer, False, 31) = ETransportResult.Ok, "hide snapshot entity before batch test")
+RouteReplication(clientSession, replica, 31)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Despawned, "hide snapshot entity for batch test")
+Local batchA:TReplicatedEntity = authority.Spawn(PLAYER_TYPE)
+Local batchB:TReplicatedEntity = authority.Spawn(PLAYER_TYPE)
+Check(batchA.SetInt32(FIELD_SCORE, 1) And batchB.SetInt32(FIELD_SCORE, 2), "create batch entities")
+Check(authority.Flush(31) = ETransportResult.Ok, "flush batch entity spawns")
+RouteReplication(clientSession, replica, 31)
+Local remoteBatchA:TReplicatedEntity
+Local remoteBatchB:TReplicatedEntity
+While replica.Poll(event)
+	If event.Kind() <> EReplicationEventKind.Spawned Then Continue
+	If event.Entity().GetInt32(FIELD_SCORE) = 1 Then remoteBatchA = event.Entity()
+	If event.Entity().GetInt32(FIELD_SCORE) = 2 Then remoteBatchB = event.Entity()
+Wend
+Check(remoteBatchA <> Null And remoteBatchB <> Null, "receive batch entity spawns")
+Check(batchA.SetInt32(FIELD_SCORE, 11) And batchB.SetInt32(FIELD_SCORE, 22), "change two reliable entities")
+Check(authority.Flush(32) = ETransportResult.Ok, "flush batched reliable updates")
+Check(authority.LastFlushPackets() = 1 And authority.LastFlushBytes() > 0, "combine two updates into one measured packet")
+RouteReplication(clientSession, replica, 32)
+Local batchUpdateCount:Int
+While replica.Poll(event)
+	If event.Kind() = EReplicationEventKind.Updated Then batchUpdateCount :+ 1
+Wend
+Check(batchUpdateCount = 2, "decode every update in batch")
+Check(remoteBatchA.GetInt32(FIELD_SCORE) = 11 And remoteBatchB.GetInt32(FIELD_SCORE) = 22, "apply batched reliable values")
+
 Check(codecEntity.SetCustom(FIELD_POSITION, Null), "allow codec to validate a custom value")
-Check(authority.Flush(31) = ETransportResult.Failed, "surface custom codec encoding failure")
+Check(authority.Flush(33) = ETransportResult.Failed, "surface custom codec encoding failure")
 Check(authority.LastFailure() = EReplicationFailure.CodecFailure, "report custom codec failure")
 
 Local malformed:Byte[2]

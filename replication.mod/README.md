@@ -113,6 +113,38 @@ The authority reserves two bytes per entity/peer pair for intended and known
 visibility. This is included in `MemoryRequirements` and does not allocate
 during ordinary relevance changes.
 
+## Update batching and traffic measurement
+
+`Flush` combines ordinary updates with the same delivery policy and tick into
+bounded per-peer packets. Each entity is still decoded and reported as its own
+update event. Reliable lifecycle transitions remain separate, so spawning,
+hiding, revealing, ownership changes, and destruction retain their ordering
+and complete-state guarantees.
+
+Two optional configuration values control the packet shape:
+
+```blitzmax
+config.maxUpdatesPerBatch = 64
+config.updateBatchCapacity = 1200
+```
+
+`updateBatchCapacity` defaults to `packetCapacity` when zero. Reducing it can
+reserve headroom for an outer protocol or backend; an individual update which
+cannot fit is reported as `PacketTooLarge`. Setting `maxUpdatesPerBatch` to one
+uses individual update packets, which can be useful while inspecting traffic.
+The effective capacity is also clamped to `TNetSession.MaxPayloadSize`, so the
+session header and backend packet limit are accounted for automatically.
+`SendCapacity` and `UpdateBatchCapacity` expose the effective values.
+
+After each flush, `LastFlushPackets` and `LastFlushBytes` report successfully
+queued replication traffic. They include update batches and any visibility
+transitions retried by that flush, but not immediate operations performed
+outside it.
+
+Batching does not change delivery semantics. Reliable changed fields and
+unreliable full snapshots are placed into separate packets, and relevance is
+evaluated independently for every peer.
+
 ## Custom field codecs
 
 The built-in typed fields remain the simplest option. A bounded codec can be

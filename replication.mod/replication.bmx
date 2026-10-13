@@ -25,11 +25,12 @@ Module GameNet.Replication
 
 ?bmxng2
 
-ModuleInfo "Version: 0.2"
+ModuleInfo "Version: 0.3"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
+ModuleInfo "History: 0.3 Add bounded application field codecs"
 ModuleInfo "History: 0.2 Add schema fingerprints, memory sizing, and periodic unreliable snapshots"
 ModuleInfo "History: 0.1 Initial schema, entity lifecycle, and reliable field replication"
 
@@ -61,6 +62,39 @@ End Enum
 
 Public
 
+Rem
+bbdoc: Encodes and decodes one bounded custom replication field.
+about: CodecId and CodecVersion form part of the schema fingerprint and must
+be stable across every participant. Encode and Decode operate on bounded
+packet views supplied by GameNet; Decode must consume the complete view.
+End Rem
+Interface IReplicationFieldCodec
+	Rem
+	bbdoc: Returns a non-zero application-defined identifier for the payload format.
+	End Rem
+	Method CodecId:UInt()
+
+	Rem
+	bbdoc: Returns the application-defined version of the payload format.
+	End Rem
+	Method CodecVersion:UInt()
+
+	Rem
+	bbdoc: Returns the maximum number of bytes produced by #Encode.
+	End Rem
+	Method MaximumBytes:UInt()
+
+	Rem
+	bbdoc: Writes @value and returns True, or returns False when it cannot be encoded.
+	End Rem
+	Method Encode:Int(value:Object, writer:SPacketWriter Var)
+
+	Rem
+	bbdoc: Decodes one complete field payload into @value.
+	End Rem
+	Method Decode:Int(reader:SPacketReader Var, value:Object Var)
+End Interface
+
 Struct SReplicationValue
 	Field intValue:Int
 	Field uintValue:UInt
@@ -68,6 +102,7 @@ Struct SReplicationValue
 	Field boolValue:Int
 	Field stringValue:String
 	Field stringBytes:Byte[]
+	Field customValue:Object
 End Struct
 
 Private
@@ -80,6 +115,7 @@ Struct SDecodedReplicationField
 	Field floatValue:Float
 	Field boolValue:Int
 	Field bytes:SPacketView
+	Field customValue:Object
 End Struct
 
 Public
@@ -93,6 +129,7 @@ Enum EReplicationFieldType:Byte
 	Float32
 	Boolean
 	Utf8String
+	Custom
 End Enum
 
 Rem
@@ -136,6 +173,7 @@ Enum EReplicationFailure:Int
 	PacketTooLarge
 	WrongAuthority
 	EventQueueOverflow
+	CodecFailure
 End Enum
 
 Rem
@@ -181,14 +219,16 @@ Struct SReplicationField
 	Field _id:UInt
 	Field _fieldType:EReplicationFieldType
 	Field _maxStringBytes:UInt
+	Field _codec:IReplicationFieldCodec
 
 	Method New()
 	End Method
 
-	Method New(id:UInt, fieldType:EReplicationFieldType, maxStringBytes:UInt)
+	Method New(id:UInt, fieldType:EReplicationFieldType, maxStringBytes:UInt, codec:IReplicationFieldCodec = Null)
 		_id = id
 		_fieldType = fieldType
 		_maxStringBytes = maxStringBytes
+		_codec = codec
 	End Method
 
 	Method Id:UInt()
@@ -202,13 +242,24 @@ Struct SReplicationField
 	Method MaxStringBytes:UInt()
 		Return _maxStringBytes
 	End Method
+
+	Rem
+	bbdoc: Returns the maximum encoded byte count for a string or custom field.
+	End Rem
+	Method MaximumBytes:UInt()
+		Return _maxStringBytes
+	End Method
+
+	Method Codec:IReplicationFieldCodec()
+		Return _codec
+	End Method
 End Struct
 
 Rem
 bbdoc: Defines the typed fields carried by one kind of replicated entity.
 about: Schemas are frozen when registered with a replication world. Every
 participant must register the same type id, version, field ids, field types,
-and string limits before processing that entity type.
+string limits, and codec definitions before processing that entity type.
 End Rem
 Type TReplicationSchema
 	Field _typeId:UInt
@@ -227,8 +278,9 @@ Type TReplicationSchema
 
 	Method AddField:Int(fieldId:UInt, fieldType:EReplicationFieldType, maxStringBytes:UInt)
 		If _frozen Or fieldId > 65535 Or _count = _fields.Length Then Return False
-		If fieldType < EReplicationFieldType.Int32 Or fieldType > EReplicationFieldType.Utf8String Then Return False
+		If fieldType < EReplicationFieldType.Int32 Or fieldType > EReplicationFieldType.Custom Then Return False
 		If fieldType = EReplicationFieldType.Utf8String And maxStringBytes > 65535 Then Return False
+		If fieldType = EReplicationFieldType.Custom Then Return False
 		If fieldType <> EReplicationFieldType.Utf8String Then maxStringBytes = 0
 		If FindField(fieldId) >= 0 Then Return False
 		_fields[_count] = New SReplicationField(fieldId, fieldType, maxStringBytes)
@@ -251,6 +303,10 @@ Type TReplicationSchema
 			hash = ReplicationHashUInt32(hash, _fields[index].Id())
 			hash = ReplicationHashUInt32(hash, UInt(_fields[index].FieldType()))
 			hash = ReplicationHashUInt32(hash, _fields[index].MaxStringBytes())
+			If _fields[index]._codec Then
+				hash = ReplicationHashUInt32(hash, _fields[index]._codec.CodecId())
+				hash = ReplicationHashUInt32(hash, _fields[index]._codec.CodecVersion())
+			End If
 		Next
 		Return hash
 	End Method
@@ -345,6 +401,19 @@ Type TReplicationSchema
 
 	Method AddString:Int(fieldId:UInt, maximumUtf8Bytes:UInt = 255)
 		Return AddField(fieldId, EReplicationFieldType.Utf8String, maximumUtf8Bytes)
+	End Method
+
+	Rem
+	bbdoc: Adds a bounded application-defined field encoded by @codec.
+	returns: False for an invalid codec, duplicate id, full or frozen schema.
+	End Rem
+	Method AddCodec:Int(fieldId:UInt, codec:IReplicationFieldCodec)
+		If _frozen Or Not codec Or fieldId > 65535 Or _count = _fields.Length Then Return False
+		If codec.CodecId() = 0 Or codec.MaximumBytes() = 0 Or codec.MaximumBytes() > 65535 Then Return False
+		If FindField(fieldId) >= 0 Then Return False
+		_fields[_count] = New SReplicationField(fieldId, EReplicationFieldType.Custom, codec.MaximumBytes(), codec)
+		_count :+ 1
+		Return True
 	End Method
 End Type
 
@@ -521,10 +590,45 @@ Type TReplicatedEntity
 		If index < 0 Then Return ""
 		Return _values[index].stringValue
 	End Method
+
+	Rem
+	bbdoc: Assigns a custom field value and marks it for replication.
+	about: The codec registered for the field determines the accepted runtime
+	type. Reassigning the same object also marks it dirty, allowing mutable
+	objects to be updated after their contents change.
+	End Rem
+	Method SetCustom:Int(fieldId:UInt, value:Object)
+		Local index:Int = WritableFieldIndex(fieldId, EReplicationFieldType.Custom)
+		If index < 0 Then Return False
+		_values[index].customValue = value
+		_dirty[index] = True
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns the most recently assigned or decoded custom field value.
+	End Rem
+	Method GetCustom:Object(fieldId:UInt)
+		Local index:Int = FieldIndex(fieldId, EReplicationFieldType.Custom)
+		If index < 0 Then Return Null
+		Return _values[index].customValue
+	End Method
+
+	Rem
+	bbdoc: Marks a mutable custom field dirty without replacing its object.
+	End Rem
+	Method MarkCustomDirty:Int(fieldId:UInt)
+		Local index:Int = WritableFieldIndex(fieldId, EReplicationFieldType.Custom)
+		If index < 0 Then Return False
+		_dirty[index] = True
+		Return True
+	End Method
 End Type
 
 Rem
 bbdoc: Configuration for a bounded replicated entity world.
+about: Set codecCapacity to the largest custom field payload accepted by any
+registered schema. Leave it at zero when custom field codecs are not used.
 End Rem
 Struct SReplicationConfig
 	Field maxEntities:Int
@@ -535,8 +639,9 @@ Struct SReplicationConfig
 	Field packetCapacity:Size_T
 	Field messageType:UInt
 	Field channel:UInt
+	Field codecCapacity:Size_T
 
-	Method New(maxEntities:Int = 1024, maxSchemas:Int = 64, maxPeers:Int = 16, maxFieldsPerSchema:Int = 64, eventCapacity:Int = 256, packetCapacity:Size_T = 1200, messageType:UInt = 70, channel:UInt = 0)
+	Method New(maxEntities:Int = 1024, maxSchemas:Int = 64, maxPeers:Int = 16, maxFieldsPerSchema:Int = 64, eventCapacity:Int = 256, packetCapacity:Size_T = 1200, messageType:UInt = 70, channel:UInt = 0, codecCapacity:Size_T = 0)
 		Self.maxEntities = maxEntities
 		Self.maxSchemas = maxSchemas
 		Self.maxPeers = maxPeers
@@ -545,6 +650,7 @@ Struct SReplicationConfig
 		Self.packetCapacity = packetCapacity
 		Self.messageType = messageType
 		Self.channel = channel
+		Self.codecCapacity = codecCapacity
 	End Method
 End Struct
 
@@ -596,8 +702,8 @@ Rem
 bbdoc: Manages an authoritative or replica collection of schema-backed entities.
 about: The application retains control of #TNetSession polling. Route the
 configured replication message type to #Receive. The authority calls #Flush
-after changing entity fields. Initial field updates are reliable and ordered,
-matching BRL.GNet's safe shared-state semantics.
+after changing entity fields. Schemas choose reliable changed fields or
+periodically refreshed unreliable snapshots.
 End Rem
 Type TReplicationWorld
 	Private
@@ -613,6 +719,7 @@ Type TReplicationWorld
 	Field _authorityPeer:SNetPeer
 	Field _hasAuthorityPeer:Int
 	Field _packetBuffer:Byte Ptr
+	Field _codecBuffer:Byte Ptr
 	Field _decoded:SDecodedReplicationField[]
 	Field _decodedSeen:Byte[]
 	Field _events:SReplicationEvent[]
@@ -622,6 +729,7 @@ Type TReplicationWorld
 	Field _droppedEvents:Int
 	Field _rejectedPackets:Int
 	Field _lastFailure:EReplicationFailure
+	Field _writeFailure:EReplicationFailure
 
 	Method New(session:TNetSession, role:EReplicationRole, config:SReplicationConfig)
 		_session = session
@@ -633,6 +741,7 @@ Type TReplicationWorld
 		_peers = New SNetPeer[config.maxPeers]
 		_peerUsed = New Byte[config.maxPeers]
 		_packetBuffer = MemAlloc(config.packetCapacity)
+		If config.codecCapacity Then _codecBuffer = MemAlloc(config.codecCapacity)
 		_decoded = New SDecodedReplicationField[config.maxFieldsPerSchema]
 		_decodedSeen = New Byte[config.maxFieldsPerSchema]
 		_events = New SReplicationEvent[config.eventCapacity]
@@ -642,6 +751,7 @@ Type TReplicationWorld
 		If config.maxEntities < 1 Or config.maxSchemas < 1 Or config.maxPeers < 1 Then Return False
 		If config.maxFieldsPerSchema < 1 Or config.maxFieldsPerSchema > 65535 Then Return False
 		If config.eventCapacity < 1 Or config.packetCapacity < REPLICATION_MINIMUM_PACKET_SIZE Then Return False
+		If config.codecCapacity > 65535 Then Return False
 		If config.messageType > 65535 Then Return False
 		Return True
 	End Function
@@ -714,6 +824,22 @@ Type TReplicationWorld
 				If value.stringBytes Then length = UInt(value.stringBytes.Length)
 				writer.WriteUInt16(length)
 				If length Then writer.WriteBytes(Byte Ptr(value.stringBytes), Size_T(length))
+			Case EReplicationFieldType.Custom
+				If Not definition._codec Or Not _codecBuffer Then
+					_writeFailure = EReplicationFailure.CodecFailure
+					Return False
+				End If
+				Local codecWriter:SPacketWriter = New SPacketWriter(_codecBuffer, Size_T(definition._maxStringBytes))
+				If Not definition._codec.Encode(value.customValue, codecWriter) Or codecWriter.Failed() Then
+					_writeFailure = EReplicationFailure.CodecFailure
+					Return False
+				End If
+				Local encodedLength:Size_T = codecWriter.Position()
+				If encodedLength > Size_T(definition._maxStringBytes) Or encodedLength > 65535 Then Return False
+				writer.WriteUInt16(UInt(encodedLength))
+				If encodedLength Then writer.WriteBytes(_codecBuffer, encodedLength)
+			Default
+				Return False
 		End Select
 		Return Not writer.Failed()
 	End Method
@@ -734,6 +860,7 @@ Type TReplicationWorld
 	End Method
 
 	Method WriteSpawn:Size_T(entity:TReplicatedEntity, tick:UInt)
+		_writeFailure = EReplicationFailure.None
 		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Spawn))
@@ -749,6 +876,7 @@ Type TReplicationWorld
 	End Method
 
 	Method WriteUpdate:Size_T(entity:TReplicatedEntity, tick:UInt, allFields:Int)
+		_writeFailure = EReplicationFailure.None
 		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Update))
@@ -760,6 +888,7 @@ Type TReplicationWorld
 	End Method
 
 	Method WriteDespawn:Size_T(entity:TReplicatedEntity, tick:UInt, reason:Int)
+		_writeFailure = EReplicationFailure.None
 		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Despawn))
@@ -772,6 +901,7 @@ Type TReplicationWorld
 	End Method
 
 	Method WriteOwnership:Size_T(entity:TReplicatedEntity, tick:UInt)
+		_writeFailure = EReplicationFailure.None
 		Local writer:SPacketWriter = New SPacketWriter(_packetBuffer, _config.packetCapacity)
 		writer.WriteUInt8(REPLICATION_PROTOCOL_VERSION)
 		writer.WriteUInt8(UInt(EReplicationPacketKind.Ownership))
@@ -783,19 +913,22 @@ Type TReplicationWorld
 		Return writer.Position()
 	End Method
 
-	Method SendToPeer:ETransportResult(peer:SNetPeer, length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
-		If length = 0 Then
-			Fail(EReplicationFailure.PacketTooLarge)
-			Return ETransportResult.PacketTooLarge
+	Method ReportWriteFailure:ETransportResult()
+		If _writeFailure = EReplicationFailure.CodecFailure Then
+			Fail(EReplicationFailure.CodecFailure)
+			Return ETransportResult.Failed
 		End If
+		Fail(EReplicationFailure.PacketTooLarge)
+		Return ETransportResult.PacketTooLarge
+	End Method
+
+	Method SendToPeer:ETransportResult(peer:SNetPeer, length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
+		If length = 0 Then Return ReportWriteFailure()
 		Return _session.Send(peer, _config.messageType, _config.channel, delivery, _packetBuffer, length)
 	End Method
 
 	Method Broadcast:ETransportResult(length:Size_T, delivery:EDeliveryMode = EDeliveryMode.ReliableOrdered)
-		If length = 0 Then
-			Fail(EReplicationFailure.PacketTooLarge)
-			Return ETransportResult.PacketTooLarge
-		End If
+		If length = 0 Then Return ReportWriteFailure()
 		Local result:ETransportResult = ETransportResult.Ok
 		For Local index:Int = 0 Until _peers.Length
 			If Not _peerUsed[index] Then Continue
@@ -840,6 +973,16 @@ Type TReplicationWorld
 					If Size_T(length) > reader.Remaining() Then Return False
 					_decoded[decodedIndex].bytes = New SPacketView(reader.RemainingView().Data(), Size_T(length))
 					If Not reader.Skip(Size_T(length)) Then Return False
+				Case EReplicationFieldType.Custom
+					Local encodedLength:UInt
+					Local definition:SReplicationField = schema._fields[fieldIndex]
+					If Not definition._codec Or Not reader.ReadUInt16(encodedLength) Or encodedLength > definition._maxStringBytes Then Return False
+					If Size_T(encodedLength) > reader.Remaining() Then Return False
+					Local codecReader:SPacketReader = New SPacketReader(reader.RemainingView().Data(), Size_T(encodedLength))
+					Local decodedValue:Object
+					If Not definition._codec.Decode(codecReader, decodedValue) Or codecReader.Failed() Or codecReader.Remaining() <> 0 Then Return False
+					_decoded[decodedIndex].customValue = decodedValue
+					If Not reader.Skip(Size_T(encodedLength)) Then Return False
 				Default
 					Return False
 			End Select
@@ -865,6 +1008,8 @@ Type TReplicationWorld
 					entity._values[index].stringBytes = New Byte[length]
 					If length Then MemCopy(Byte Ptr(entity._values[index].stringBytes), _decoded[decodedIndex].bytes.Data(), Size_T(length))
 					entity._values[index].stringValue = String.FromUTF8Bytes(Byte Ptr(entity._values[index].stringBytes), length)
+				Case EReplicationFieldType.Custom
+					entity._values[index].customValue = _decoded[decodedIndex].customValue
 			End Select
 			entity._dirty[index] = True
 		Next
@@ -956,12 +1101,14 @@ Type TReplicationWorld
 	returns: False for an invalid configuration or Size_T arithmetic overflow.
 	about: The managed estimate includes fixed world arrays and per-field arrays
 	for every entity slot. Runtime object and array headers, target objects, and
-	the variable UTF-8 contents of string fields are not included.
+	the variable UTF-8 contents of string fields are not included. Native bytes
+	include the packet buffer and optional codec scratch buffer.
 	End Rem
 	Function MemoryRequirements:Int(config:SReplicationConfig, requirements:SNetMemoryRequirements Var)
 		requirements = New SNetMemoryRequirements
 		If Not ValidConfigValues(config) Then Return False
 		Local nativeBytes:Size_T = config.packetCapacity
+		If Not NetAccumulateSize(nativeBytes, 1, config.codecCapacity) Then Return False
 		Local managedBytes:Size_T
 		Local entityCount:Size_T = Size_T(config.maxEntities)
 		Local schemaCount:Size_T = Size_T(config.maxSchemas)
@@ -1007,6 +1154,12 @@ Type TReplicationWorld
 	Method RegisterSchema:Int(schema:TReplicationSchema)
 		If Not schema Or schema._count < 1 Or schema._count > _config.maxFieldsPerSchema Then Return False
 		If _schemaCount = _schemas.Length Or SchemaForType(schema._typeId) Then Return False
+		For Local index:Int = 0 Until schema._count
+			Local definition:SReplicationField = schema._fields[index]
+			If definition._fieldType = EReplicationFieldType.Custom Then
+				If Not definition._codec Or Size_T(definition._maxStringBytes) > _config.codecCapacity Then Return False
+			End If
+		Next
 		If Not schema._frozen Then schema.Freeze()
 		_schemas[_schemaCount] = schema
 		_schemaCount :+ 1
@@ -1201,7 +1354,9 @@ Type TReplicationWorld
 
 	Method Close()
 		If _packetBuffer Then MemFree(_packetBuffer)
+		If _codecBuffer Then MemFree(_codecBuffer)
 		_packetBuffer = Null
+		_codecBuffer = Null
 	End Method
 
 	Method Delete()

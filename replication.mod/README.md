@@ -72,6 +72,62 @@ The estimate covers bounded payload storage. Runtime object and array headers,
 associated target objects, and variable string contents are deliberately not
 included.
 
+## Custom field codecs
+
+The built-in typed fields remain the simplest option. A bounded codec can be
+used when a game already has a useful state object or component representation.
+The codec serializes only that field; GameNet continues to own packet framing,
+entity identity, compatibility checks, delivery, and lifecycle.
+
+```blitzmax
+Type TTransformCodec Implements IReplicationFieldCodec
+	Method CodecId:UInt()
+		Return $54524e53 ' TRNS
+	End Method
+
+	Method CodecVersion:UInt()
+		Return 1
+	End Method
+
+	Method MaximumBytes:UInt()
+		Return 8
+	End Method
+
+	Method Encode:Int(value:Object, writer:SPacketWriter Var)
+		Local transform:TTransform = TTransform(value)
+		If Not transform Then Return False
+		Return writer.WriteFloat32(transform.x) And writer.WriteFloat32(transform.y)
+	End Method
+
+	Method Decode:Int(reader:SPacketReader Var, value:Object Var)
+		Local x:Float, y:Float
+		If Not reader.ReadFloat32(x) Or Not reader.ReadFloat32(y) Then Return False
+		value = New TTransform(x, y)
+		Return True
+	End Method
+End Type
+```
+
+Reserve codec scratch capacity in the world configuration, then add the field:
+
+```blitzmax
+Local config:SReplicationConfig = New SReplicationConfig
+config.codecCapacity = 64
+
+schema.AddCodec(FIELD_TRANSFORM, New TTransformCodec)
+entity.SetCustom(FIELD_TRANSFORM, transform)
+```
+
+`CodecId`, `CodecVersion`, and `MaximumBytes` are included in the schema
+fingerprint. They must agree on every participant. `Encode` may not exceed its
+declared bound, and `Decode` must consume the complete supplied payload. Call
+`MarkCustomDirty` after mutating an object in place. A codec returning `False`
+causes `Flush` to fail with `EReplicationFailure.CodecFailure`.
+
+This interface is suitable for handwritten compact binary codecs and future
+optional adapters such as `Text.MPack`; the core module does not require a
+particular object serialization package.
+
 The entity storage API is intentionally independent of BlitzMax game objects
 and ECS implementations. `SetTarget` can associate an ordinary game object
 with an entity. A future Flecs adapter will map the same stable identities and

@@ -46,7 +46,8 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.Replication` provides a GNet-style schema and replicated-entity
   facade with stable identities, typed fields, ownership, reliable changed
   fields or periodic full unreliable snapshots, late-join state, schema
-  compatibility checks, and bounded lifecycle events above a session.
+  compatibility checks, bounded custom field codecs, and lifecycle events
+  above a session.
 - `GameNet.Rollback` optionally stores deterministic frame state and predicted
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a

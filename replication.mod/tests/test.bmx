@@ -11,6 +11,43 @@ End Function
 Type TTestTarget
 End Type
 
+Type TPositionState
+	Field x:Float
+	Field y:Float
+
+	Method New(x:Float, y:Float)
+		Self.x = x
+		Self.y = y
+	End Method
+End Type
+
+Type TPositionCodec Implements IReplicationFieldCodec
+	Method CodecId:UInt()
+		Return $504f5332 ' POS2
+	End Method
+
+	Method CodecVersion:UInt()
+		Return 1
+	End Method
+
+	Method MaximumBytes:UInt()
+		Return 8
+	End Method
+
+	Method Encode:Int(value:Object, writer:SPacketWriter Var)
+		Local position:TPositionState = TPositionState(value)
+		If Not position Then Return False
+		Return writer.WriteFloat32(position.x) And writer.WriteFloat32(position.y)
+	End Method
+
+	Method Decode:Int(reader:SPacketReader Var, value:Object Var)
+		Local x:Float, y:Float
+		If Not reader.ReadFloat32(x) Or Not reader.ReadFloat32(y) Then Return False
+		value = New TPositionState(x, y)
+		Return True
+	End Method
+End Type
+
 Const APP_ID:UInt = $52504c43 ' RPLC
 Const APP_VERSION:UInt = 1
 Const REPLICATION_MESSAGE:UInt = 70
@@ -23,6 +60,8 @@ Const SNAPSHOT_TYPE:UInt = 2
 Const FIELD_SNAPSHOT_X:UInt = 1
 Const MISMATCH_TYPE:UInt = 3
 Const FIELD_MISMATCH_VALUE:UInt = 1
+Const CODEC_TYPE:UInt = 4
+Const FIELD_POSITION:UInt = 1
 
 Function CreatePlayerSchema:TReplicationSchema()
 	Local schema:TReplicationSchema = TReplicationSchema.Create(PLAYER_TYPE, 3, 8)
@@ -54,6 +93,13 @@ Function CreateMismatchSchema:TReplicationSchema(useUnsigned:Int)
 	Return schema
 End Function
 
+Function CreateCodecSchema:TReplicationSchema()
+	Local schema:TReplicationSchema = TReplicationSchema.Create(CODEC_TYPE, 1, 1)
+	Check(schema <> Null, "create codec schema")
+	Check(schema.AddCodec(FIELD_POSITION, New TPositionCodec), "add custom codec field")
+	Return schema
+End Function
+
 Function RouteReplication(session:TNetSession, world:TReplicationWorld, nowMillis:UInt)
 	Local event:SSessionEvent
 	While session.PollAt(event, nowMillis)
@@ -81,16 +127,20 @@ Check(hostSession.PollAt(sessionEvent, 0) And sessionEvent.Kind() = ESessionEven
 Check(clientSession.PollAt(sessionEvent, 0) And sessionEvent.Kind() = ESessionEventKind.Joined, "client joined")
 Local clientPeer:SNetPeer = sessionEvent.Peer()
 
-Local config:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1)
+Local config:SReplicationConfig = New SReplicationConfig(8, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1, 64)
 Local requirements:SNetMemoryRequirements
 Check(TReplicationWorld.MemoryRequirements(config, requirements), "calculate replication memory requirements")
-Check(requirements.NativeBytes() = 1200 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
+Check(requirements.NativeBytes() = 1264 And requirements.ManagedArrayBytes() > 0, "report native and managed storage")
 Local invalidConfig:SReplicationConfig = New SReplicationConfig(0, 4, 2, 8, 32, 1200, REPLICATION_MESSAGE, 1)
 Check(Not TReplicationWorld.MemoryRequirements(invalidConfig, requirements), "reject invalid memory configuration")
 
 Local authority:TReplicationWorld = TReplicationWorld.CreateAuthority(hostSession, config)
 Local replica:TReplicationWorld = TReplicationWorld.CreateReplica(clientSession, config)
 Check(authority <> Null And replica <> Null, "create replication worlds")
+Local noCodecConfig:SReplicationConfig = New SReplicationConfig(1, 1, 1, 1, 4, 1200, REPLICATION_MESSAGE, 1)
+Local noCodecWorld:TReplicationWorld = TReplicationWorld.CreateAuthority(hostSession, noCodecConfig)
+Check(noCodecWorld <> Null And Not noCodecWorld.RegisterSchema(CreateCodecSchema()), "require configured codec scratch capacity")
+noCodecWorld.Close()
 Local authorityPlayerSchema:TReplicationSchema = CreatePlayerSchema()
 Local replicaPlayerSchema:TReplicationSchema = CreatePlayerSchema()
 Check(authorityPlayerSchema.Fingerprint() = replicaPlayerSchema.Fingerprint(), "matching schemas have matching fingerprints")
@@ -104,6 +154,8 @@ Check(authority.RegisterSchema(CreateSnapshotSchema()), "register authority snap
 Check(replica.RegisterSchema(CreateSnapshotSchema()), "register replica snapshot schema")
 Check(authority.RegisterSchema(CreateMismatchSchema(False)), "register authority mismatch schema")
 Check(replica.RegisterSchema(CreateMismatchSchema(True)), "register replica mismatch schema")
+Check(authority.RegisterSchema(CreateCodecSchema()), "register authority codec schema")
+Check(replica.RegisterSchema(CreateCodecSchema()), "register replica codec schema")
 Check(authority.AddPeer(hostPeer) = ETransportResult.Ok, "add authority peer")
 Check(replica.BindAuthority(clientPeer), "bind replica authority")
 
@@ -189,6 +241,27 @@ Check(clientSession.PollAt(sessionEvent, 25) And sessionEvent.Kind() = ESessionE
 Check(Not replica.Receive(sessionEvent.Peer(), sessionEvent.MessageType(), sessionEvent.Payload()), "reject mismatched schema on the wire")
 Check(replica.LastFailure() = EReplicationFailure.SchemaFingerprintMismatch, "report schema fingerprint mismatch")
 Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Error, "queue schema mismatch error")
+
+Local codecEntity:TReplicatedEntity = authority.Spawn(CODEC_TYPE)
+Local position:TPositionState = New TPositionState(12.5, -8.25)
+Check(codecEntity <> Null And codecEntity.SetCustom(FIELD_POSITION, position), "assign custom codec value")
+Check(authority.Flush(26) = ETransportResult.Ok, "flush custom codec spawn")
+RouteReplication(clientSession, replica, 26)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Spawned, "custom codec spawn event")
+Local remoteCodecEntity:TReplicatedEntity = event.Entity()
+Local remotePosition:TPositionState = TPositionState(remoteCodecEntity.GetCustom(FIELD_POSITION))
+Check(remotePosition <> Null And remotePosition.x = 12.5 And remotePosition.y = -8.25, "decode custom codec value")
+position.x = 91.0
+position.y = 42.0
+Check(codecEntity.MarkCustomDirty(FIELD_POSITION), "mark mutable custom value dirty")
+Check(authority.Flush(27) = ETransportResult.Ok, "flush custom codec update")
+RouteReplication(clientSession, replica, 27)
+Check(replica.Poll(event) And event.Kind() = EReplicationEventKind.Updated, "custom codec update event")
+remotePosition = TPositionState(remoteCodecEntity.GetCustom(FIELD_POSITION))
+Check(remotePosition.x = 91.0 And remotePosition.y = 42.0, "update custom codec value")
+Check(codecEntity.SetCustom(FIELD_POSITION, Null), "allow codec to validate a custom value")
+Check(authority.Flush(28) = ETransportResult.Failed, "surface custom codec encoding failure")
+Check(authority.LastFailure() = EReplicationFailure.CodecFailure, "report custom codec failure")
 
 Local malformed:Byte[2]
 malformed[0] = 255

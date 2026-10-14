@@ -40,12 +40,15 @@ deterministic state hashes.
 
 `protocol.bmx` defines compact backend-neutral messages for online moves and
 state recovery. `GameNet.MatchRoom` carries the room configuration, readiness,
-round and shared starting state. On Apple targets the Multiplayer menu offers
-Game Center quick match.
-Matched players enter a persistent room where the host selects a square or hex
-duel and both players ready up before play. After a match, each player returns
-to the lobby independently; the lobby shows when the other player is still on
-the results screen and does not permit another ready-up until both return.
+round and shared starting state. On Apple targets the Multiplayer menu asks
+Game Center to find between two and four players. Once the initial group has
+formed, the elected host can either wait for more players or start with those
+currently present.
+The completed matchmaking group enters a persistent game lobby where the host
+selects a board suitable for its player count and everyone readies up before play. After
+a match, each player returns to the room independently; the room shows when
+another player is still on the results screen and does not permit another
+ready-up until everyone returns.
 GameKit supplies matchmaking and transport, while a GameNet session elects
 the authority and carries the same deterministic protocol that another
 backend could use later.

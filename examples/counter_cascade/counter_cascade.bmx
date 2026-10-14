@@ -82,6 +82,8 @@ Global onlineHost:Int
 Global onlineJoined:Int
 Global onlineMode:Int
 Global onlineOpening:Int
+Const ONLINE_ROOM_CAPACITY:Int = 4
+Global onlineDesiredPlayers:Int = 2
 Global onlineWaitingForMove:Int
 Global onlineMoveRequest:SCascadeMoveRequest
 Global onlineMoveSentAt:UInt
@@ -91,6 +93,7 @@ Global onlineResyncPending:Int
 Global onlineResyncSentAt:UInt
 Global onlineResyncRetries:Int
 Global pendingMoveRequest:SCascadeMoveRequest
+Global pendingMovePlayer:Int = -1
 Global hasPendingMoveRequest:Int
 Global pendingAppliedMove:SCascadeAppliedMove
 Global hasPendingAppliedMove:Int
@@ -240,7 +243,7 @@ Function UpdateMenu()
 		Local roomX:Float, roomY:Float
 		If PollPress(roomX, roomY) Then
 			If onlineJoined Then
-				If onlineHost And roomY >= 405 And roomY < 457 And ((roomX >= 210 And roomX < 310) Or (roomX >= 690 And roomX < 790)) Then
+				If onlineHost And roomY >= 380 And roomY < 432 And ((roomX >= 210 And roomX < 310) Or (roomX >= 690 And roomX < 790)) Then
 					CycleOnlineMatch()
 				Else If roomY >= 515 And roomY < 575 And roomX >= 300 And roomX < 480 Then
 					SetOnlineReady()
@@ -249,10 +252,20 @@ Function UpdateMenu()
 					menuPage = ECascadeMenuPage.Multiplayer
 					statusText = "Choose a multiplayer mode"
 				End If
-			Else If roomY >= 485 And roomY < 545 And roomX >= 410 And roomX < 590 Then
-				CloseOnlineMatch()
-				menuPage = ECascadeMenuPage.Multiplayer
-				statusText = "Choose a multiplayer mode"
+			Else
+				Local providerLobby:IOnlineLobby
+				If online Then providerLobby = online.CurrentLobby()
+				If providerLobby And providerLobby.Owner().IsLocal() And providerLobby.MemberCount() >= 2 And roomY >= 515 And roomY < 575 And roomX >= 300 And roomX < 480 Then
+					If online.StartMatch() Then statusText = "Starting with " + providerLobby.MemberCount() + " players..."
+				Else If providerLobby And roomY >= 515 And roomY < 575 And roomX >= 520 And roomX < 700 Then
+					CloseOnlineMatch()
+					menuPage = ECascadeMenuPage.Multiplayer
+					statusText = "Choose a multiplayer mode"
+				Else If Not providerLobby And roomY >= 485 And roomY < 545 And roomX >= 410 And roomX < 590 Then
+					CloseOnlineMatch()
+					menuPage = ECascadeMenuPage.Multiplayer
+					statusText = "Choose a multiplayer mode"
+				End If
 			End If
 		End If
 		Return
@@ -294,7 +307,7 @@ Function UpdateMenu()
 			?macos Or ios
 			If x >= 200 And x < 800 And y >= 285 And y < 345 Then BeginOnlineSearch()
 			?
-			If x >= 410 And x < 590 And y >= 500 And y < 560 Then OpenMainMenu()
+			If x >= 410 And x < 590 And y >= 530 And y < 590 Then OpenMainMenu()
 	End Select
 End Function
 
@@ -393,12 +406,13 @@ End Function
 ?macos Or ios
 Function BeginOnlineSearch()
 	If onlineSession Or onlineRequest Then Return
+	onlineDesiredPlayers = 2
 	onlineMode = True
 	lobbyOpen = False
 	game = Null
 	viewGrid = Null
 	statusText = "Connecting to Game Center..."
-	If Not online Then online = TGameKitOnlineService.Create(1, 2, 900)
+	If Not online Then online = TGameKitOnlineService.Create(3, 2, 900)
 	If Not online Then
 		statusText = "Game Center multiplayer is unavailable"
 		Return
@@ -414,13 +428,25 @@ Function StartOnlineMatchmaking()
 	If Not online Or online.State() <> EOnlineServiceState.Ready Or onlineRequest Then Return
 	Local request:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
 	request.minPlayers = 2
-	request.maxPlayers = 2
+	request.maxPlayers = ONLINE_ROOM_CAPACITY
 	onlineRequest = online.StartMatchmaking(request)
 	If onlineRequest = 0 Then
 		statusText = "Could not start Game Center matchmaking"
 	Else
-		statusText = "Looking for another player..."
+		statusText = "Looking for players (2-4)..."
 	End If
+End Function
+
+Function DefaultOnlineConfig:SCascadeMatchConfig(players:Int)
+	Select players
+		Case 2
+			Return New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, MilliSecs() Mod 2)
+		Case 3
+			Return New SCascadeMatchConfig(ECascadeBoardLayout.Hexagon, 4, 3, MilliSecs() Mod 3)
+		Case 4
+			Return New SCascadeMatchConfig(ECascadeBoardLayout.Square, 8, 4, MilliSecs() Mod 4)
+	End Select
+	Return New SCascadeMatchConfig
 End Function
 
 Function BeginOnlineSession(requestId:UInt)
@@ -435,8 +461,10 @@ Function BeginOnlineSession(requestId:UInt)
 		Return
 	End If
 	onlineHost = info.IsSessionHost()
+	onlineDesiredPlayers = info.PlayerCount()
 	onlineWaitingForMove = False
 	hasPendingMoveRequest = False
+	pendingMovePlayer = -1
 	hasPendingAppliedMove = False
 	hasLastAppliedMove = False
 	onlineMoveRetries = 0
@@ -445,7 +473,7 @@ Function BeginOnlineSession(requestId:UInt)
 	onlineResyncRetries = 0
 	onlineDebugText = ""
 	If onlineHost Then
-		onlineSession = TNetSession.CreateHost(onlineTransport, CASCADE_APP_ID, CASCADE_APP_VERSION, 1, 900)
+		onlineSession = TNetSession.CreateHost(onlineTransport, CASCADE_APP_ID, CASCADE_APP_VERSION, ONLINE_ROOM_CAPACITY - 1, 900)
 	Else
 		onlineSession = TNetSession.CreateClient(onlineTransport, CASCADE_APP_ID, CASCADE_APP_VERSION, Null, 0, 1, 900)
 	End If
@@ -453,7 +481,7 @@ Function BeginOnlineSession(requestId:UInt)
 		statusText = "Could not create the Counter Cascade session"
 		Return
 	End If
-	Local roomConfig:SMatchRoomConfig = New SMatchRoomConfig(2, CASCADE_ROOM_COMMAND_MESSAGE, CASCADE_ROOM_STATE_MESSAGE, CASCADE_CONTROL_CHANNEL, 32, 32)
+	Local roomConfig:SMatchRoomConfig = New SMatchRoomConfig(ONLINE_ROOM_CAPACITY, CASCADE_ROOM_COMMAND_MESSAGE, CASCADE_ROOM_STATE_MESSAGE, CASCADE_CONTROL_CHANNEL, 32, 64)
 	If onlineHost Then
 		onlineRoom = TMatchRoom.CreateHost(onlineSession, roomConfig)
 	Else
@@ -464,6 +492,11 @@ Function BeginOnlineSession(requestId:UInt)
 		onlineSession.Close()
 		onlineSession = Null
 		Return
+	End If
+	If onlineHost Then
+		lobbyConfig = DefaultOnlineConfig(info.PlayerCount())
+		ResetPlayerColours()
+		If PublishOnlineLobbyConfig() Then onlineLobbyConfigReady = True
 	End If
 	onlineSession.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000))
 	onlineRequest = 0
@@ -480,7 +513,10 @@ Function PollOnlineGame()
 				onlineOpening = False
 				If onlineMode Then StartOnlineMatchmaking()
 				Case EOnlineEventKind.MatchmakingStarted
-					statusText = "Looking for another player..."
+					statusText = "Looking for players (2-4)..."
+				Case EOnlineEventKind.LobbyJoined, EOnlineEventKind.LobbyChanged
+					Local providerLobby:IOnlineLobby = online.CurrentLobby()
+					If providerLobby Then statusText = providerLobby.MemberCount() + " of " + providerLobby.MaxPlayers() + " players in the lobby"
 				Case EOnlineEventKind.MatchReady
 					BeginOnlineSession(onlineEvent.RequestId())
 				Case EOnlineEventKind.MatchmakingCancelled
@@ -506,21 +542,14 @@ Function PollOnlineSession()
 			Case ESessionEventKind.JoinRequested
 				If onlineSession.Accept(sessionEvent.Peer()) <> ETransportResult.Ok Then statusText = "Could not accept the other player"
 			Case ESessionEventKind.Joined
-				onlinePeer = sessionEvent.Peer()
+				If Not onlineHost Then onlinePeer = sessionEvent.Peer()
 				onlineJoined = True
-				If onlineRoom.PlayerJoined(onlinePeer) <> ETransportResult.Ok Then
+				If onlineRoom.PlayerJoined(sessionEvent.Peer()) <> ETransportResult.Ok Then
 					ReturnToMultiplayerAfterFailure("Could not join the online room")
 					Return
 				End If
 				If onlineHost Then
-					lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, MilliSecs() Mod 2)
-					ResetPlayerColours()
-					If PublishOnlineLobbyConfig() Then
-						onlineLobbyConfigReady = True
-						statusText = "Choose a match, then ready up"
-					Else
-						statusText = "Could not publish the match settings"
-					End If
+					statusText = "Room joined: " + onlineRoom.MemberCount() + " of " + onlineRoom.MaxPlayers()
 				Else
 					statusText = "Connected; waiting for the host..."
 				End If
@@ -531,8 +560,12 @@ Function PollOnlineSession()
 					ReceiveOnlineMessage(sessionEvent)
 				End If
 			Case ESessionEventKind.Left
-				ReturnToMultiplayerAfterFailure("The other player left the match")
-				Return
+				If onlineHost And onlineRoom.PlayerLeft(sessionEvent.Peer(), sessionEvent.Code()) = ETransportResult.Ok Then
+					statusText = "A player left the lobby"
+				Else
+					ReturnToMultiplayerAfterFailure("The room host left the match")
+					Return
+				End If
 			Case ESessionEventKind.Rejected
 				ReturnToMultiplayerAfterFailure("The Counter Cascade session was rejected")
 				Return
@@ -561,15 +594,35 @@ Function PublishOnlineLobbyConfig:Int()
 	Return onlineRoom.SetConfiguration(New SPacketView(Byte Ptr(onlinePacket), length)) = ETransportResult.Ok
 End Function
 
+Function RefreshOnlineLobbyForRoster()
+	If Not onlineHost Or Not onlineRoom Or onlineRoom.Phase() <> EMatchRoomPhase.Staging Then Return
+	Local players:Int = onlineRoom.MemberCount()
+	If players < 2 Or players > ONLINE_ROOM_CAPACITY Then Return
+	If Not onlineLobbyConfigReady Or lobbyConfig.playerCount <> players Then
+		lobbyConfig = DefaultOnlineConfig(players)
+		ResetPlayerColours()
+		If PublishOnlineLobbyConfig() Then
+			onlineLobbyConfigReady = True
+			statusText = players + " players in the lobby; choose READY when ready"
+		Else
+			statusText = "Could not update the match for the new roster"
+		End If
+	End If
+End Function
+
 Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 	Select sessionEvent.MessageType()
 		Case CASCADE_MSG_MOVE_REQUEST
 			If Not onlineHost Or hasPendingMoveRequest Then Return
 			Local request:SCascadeMoveRequest
 			If DecodeCascadeMoveRequest(sessionEvent.Payload(), request) Then
-				pendingMoveRequest = request
-				hasPendingMoveRequest = True
-				onlineDebugText = "Host received move for turn " + request.turn
+				Local requestPlayer:Int = onlineRoom.PlayerForSessionPeer(sessionEvent.Peer())
+				If requestPlayer > 0 Then
+					pendingMoveRequest = request
+					pendingMovePlayer = requestPlayer
+					hasPendingMoveRequest = True
+					onlineDebugText = "Host received Player " + (requestPlayer + 1) + " move for turn " + request.turn
+				End If
 			Else
 				onlineDebugText = "Host rejected a malformed move packet"
 			End If
@@ -581,7 +634,7 @@ Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 				hasPendingAppliedMove = True
 			End If
 		Case CASCADE_MSG_STATE_REQUEST
-			If onlineHost And sessionEvent.Payload().Length() = 0 Then SendOnlineState()
+			If onlineHost And sessionEvent.Payload().Length() = 0 Then SendOnlineState(sessionEvent.Peer())
 		Case CASCADE_MSG_STATE
 			If onlineHost Or Not game Then Return
 			If DecodeCascadeState(sessionEvent.Payload(), game) Then
@@ -602,11 +655,11 @@ Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 	End Select
 End Function
 
-Function SendOnlineState:Int()
+Function SendOnlineState:Int(peer:SNetPeer)
 	If Not onlineHost Or Not onlineSession Or Not onlineJoined Or Not game Then Return False
 	Local length:Size_T = EncodeCascadeState(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length), game)
 	If length = 0 Then Return False
-	Return onlineSession.Send(onlinePeer, CASCADE_MSG_STATE, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) = ETransportResult.Ok
+	Return onlineSession.Send(peer, CASCADE_MSG_STATE, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) = ETransportResult.Ok
 End Function
 
 Function RequestOnlineState(reason:String)
@@ -652,6 +705,7 @@ Function ShowOnlineRoom(message:String)
 	animationActive = False
 	onlineWaitingForMove = False
 	hasPendingMoveRequest = False
+	pendingMovePlayer = -1
 	hasPendingAppliedMove = False
 	onlineResyncPending = False
 	onlineResyncRetries = 0
@@ -672,7 +726,7 @@ End Function
 Function ApplyOnlineRoomConfiguration:Int()
 	If Not onlineRoom Then Return False
 	Local config:SCascadeMatchConfig
-	If Not DecodeCascadeConfig(onlineRoom.Configuration(), config) Or config.playerCount <> 2 Then
+	If Not DecodeCascadeConfig(onlineRoom.Configuration(), config) Or config.playerCount < 2 Or config.playerCount > onlineRoom.MaxPlayers() Then
 		statusText = "The host sent invalid room settings"
 		Return False
 	End If
@@ -687,6 +741,8 @@ Function ProcessOnlineRoomEvents()
 	Local roomEvent:SMatchRoomEvent
 	While onlineRoom.Poll(roomEvent)
 		Select roomEvent.Kind()
+			Case EMatchRoomEventKind.MemberJoined, EMatchRoomEventKind.MemberLeft
+				RefreshOnlineLobbyForRoster()
 			Case EMatchRoomEventKind.ConfigurationChanged
 				If ApplyOnlineRoomConfiguration() And Not onlineHost Then statusText = "The host selected " + LobbyDescription()
 			Case EMatchRoomEventKind.MatchStarted
@@ -699,8 +755,8 @@ Function ProcessOnlineRoomEvents()
 				End If
 			Case EMatchRoomEventKind.MemberReturned
 				If roomEvent.Player() = OnlineLocalPlayer() Then
-					If onlineRoom.IsInRoom(1 - OnlineLocalPlayer()) Then
-						ShowOnlineRoom("Both players are in the online lobby")
+					If onlineRoom.AllPresentInRoom(lobbyConfig.playerCount) Then
+						ShowOnlineRoom("All players are in the online lobby")
 					Else
 						ShowOnlineRoom("Waiting for the other player to return")
 					End If
@@ -708,7 +764,7 @@ Function ProcessOnlineRoomEvents()
 					statusText = "The other player returned to the lobby"
 				End If
 			Case EMatchRoomEventKind.StagingOpened
-				If onlineRoom.IsInRoom(OnlineLocalPlayer()) Then ShowOnlineRoom("Both players are in the online lobby")
+				If onlineRoom.IsInRoom(OnlineLocalPlayer()) Then ShowOnlineRoom("All players are in the online lobby")
 			Case EMatchRoomEventKind.AuthorityLeft
 				ReturnToMultiplayerAfterFailure("The room host left the match")
 				Return
@@ -720,7 +776,7 @@ End Function
 Function SetOnlineReady()
 	If Not onlineJoined Or Not onlineRoom Or Not onlineLobbyConfigReady Then Return
 	Local localPlayer:Int = OnlineLocalPlayer()
-	If Not onlineRoom.IsInRoom(0) Or Not onlineRoom.IsInRoom(1) Or onlineRoom.IsReady(localPlayer) Then Return
+	If Not onlineRoom.AllPresentInRoom(2) Or onlineRoom.IsReady(localPlayer) Then Return
 	If onlineRoom.SetLocalReady(True) <> ETransportResult.Ok Then
 		statusText = "Could not send ready state"
 		Return
@@ -733,13 +789,26 @@ End Function
 Function CycleOnlineMatch()
 	If Not onlineHost Or Not onlineJoined Or Not onlineRoom Or Not onlineLobbyConfigReady Then Return
 	Local startingPlayer:Int = lobbyConfig.startingPlayer
-	If lobbyConfig.layout = ECascadeBoardLayout.Square Then
-		lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Hexagon, 3, 2, startingPlayer)
-	Else
-		lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, startingPlayer)
-	End If
+	Select lobbyConfig.playerCount
+		Case 2
+			If lobbyConfig.layout = ECascadeBoardLayout.Square Then
+				lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Hexagon, 3, 2, startingPlayer)
+			Else
+				lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, startingPlayer)
+			End If
+		Case 3
+			Local nextSize:Int = 4
+			If lobbyConfig.size = 4 Then nextSize = 5
+			lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Hexagon, nextSize, 3, startingPlayer)
+		Case 4
+			If lobbyConfig.layout = ECascadeBoardLayout.Square Then
+				lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.HexRhombus, 7, 4, startingPlayer)
+			Else
+				lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 8, 4, startingPlayer)
+			End If
+	End Select
 	If PublishOnlineLobbyConfig() Then
-		statusText = "Match changed; both players must ready up"
+		statusText = "Match changed; all players must ready up"
 	Else
 		statusText = "Could not send the room settings"
 	End If
@@ -747,8 +816,9 @@ End Function
 
 Function TryStartOnlineRound()
 	If Not onlineHost Or Not onlineJoined Or Not onlineRoom Or Not onlineRoom.AllPresentReady(2) Then Return
+	If lobbyConfig.playerCount <> onlineRoom.MemberCount() Then Return
 	Local startingPlayer:Int = lobbyConfig.startingPlayer
-	If onlineRoom.Round() > 0 Then startingPlayer = (Int(onlineRoom.Seed()) + 1) Mod 2
+	If onlineRoom.Round() > 0 Then startingPlayer = (Int(onlineRoom.Seed()) + 1) Mod lobbyConfig.playerCount
 	If onlineRoom.BeginMatch(ULong(startingPlayer), 2) = ETransportResult.Ok Then ProcessOnlineRoomEvents()
 End Function
 
@@ -756,14 +826,18 @@ Function ProcessPendingOnlineMove()
 	If Not game Or animationActive Then Return
 	If onlineHost And hasPendingMoveRequest Then
 		Local request:SCascadeMoveRequest = pendingMoveRequest
+		Local requestPlayer:Int = pendingMovePlayer
 		hasPendingMoveRequest = False
-		If request.turn = game.turn And game.currentPlayer = 1 Then
-			ApplyAuthoritativeOnlineMove(1, request.cell)
-		Else If hasLastAppliedMove And lastAppliedMove.turn = request.turn And lastAppliedMove.player = 1 And lastAppliedMove.cell = request.cell Then
+		pendingMovePlayer = -1
+		If request.turn = game.turn And game.currentPlayer = requestPlayer Then
+			ApplyAuthoritativeOnlineMove(requestPlayer, request.cell)
+		Else If hasLastAppliedMove And lastAppliedMove.turn = request.turn And lastAppliedMove.player = requestPlayer And lastAppliedMove.cell = request.cell Then
 			SendOnlineAppliedMove(lastAppliedMove)
 			onlineDebugText = "Host acknowledged a repeated move"
 		Else
 			onlineDebugText = "Host expected turn " + game.turn + ", player " + (game.currentPlayer + 1)
+			Local peer:SNetPeer = onlineRoom.SessionPeer(requestPlayer)
+			If peer.IsValid() Then SendOnlineState(peer)
 		End If
 	Else If Not onlineHost And hasPendingAppliedMove Then
 		Local move:SCascadeAppliedMove = pendingAppliedMove
@@ -829,7 +903,12 @@ End Function
 Function SendOnlineAppliedMove:Int(move:SCascadeAppliedMove)
 	Local length:Size_T = EncodeCascadeAppliedMove(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length), move)
 	If length = 0 Then Return False
-	Return onlineSession.Send(onlinePeer, CASCADE_MSG_MOVE_APPLIED, CASCADE_GAME_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) = ETransportResult.Ok
+	Local result:Int = True
+	For Local player:Int = 1 Until onlineRoom.MaxPlayers()
+		Local peer:SNetPeer = onlineRoom.SessionPeer(player)
+		If peer.IsValid() And onlineSession.Send(peer, CASCADE_MSG_MOVE_APPLIED, CASCADE_GAME_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) <> ETransportResult.Ok Then result = False
+	Next
+	Return result
 End Function
 
 Function SendOnlineMove(cell:Int)
@@ -883,6 +962,7 @@ Function CloseOnlineMatch()
 	onlineMode = False
 	onlineWaitingForMove = False
 	hasPendingMoveRequest = False
+	pendingMovePlayer = -1
 	hasPendingAppliedMove = False
 	hasLastAppliedMove = False
 	onlineMoveRetries = 0
@@ -1129,12 +1209,12 @@ End Function
 Function DrawMultiplayerMenu()
 	SetColor 154, 171, 197
 	Local heading:String = "MULTIPLAYER"
-	DrawText heading, (SCREEN_WIDTH - TextWidth(heading)) * 0.5, 155
+	DrawText heading, (SCREEN_WIDTH - TextWidth(heading)) * 0.5, 130
 	?macos Or ios
-	DrawMenuButton 285, "1   QUICK MATCH", 40, 115, 205
+	DrawMenuButton 285, "1   FIND ONLINE PLAYERS", 40, 115, 205
 	SetColor 145, 163, 191
-	Local provider:String = "Find another player through Game Center"
-	DrawText provider, (SCREEN_WIDTH - TextWidth(provider)) * 0.5, 370
+	Local provider:String = "Game Center matches two to four players"
+	DrawText provider, (SCREEN_WIDTH - TextWidth(provider)) * 0.5, 405
 	?
 	?Not macos And Not ios
 	SetColor 145, 163, 191
@@ -1143,23 +1223,29 @@ Function DrawMultiplayerMenu()
 	?
 	If statusText <> "Choose a multiplayer mode" Then
 		SetColor 210, 176, 112
-		DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 425
+		DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 505
 	End If
-	DrawLobbyButton 410, 500, "BACK", 58, 68, 91
+	DrawLobbyButton 410, 530, "BACK", 58, 68, 91
 	SetColor 126, 143, 170
-	Local hint:String = "Rooms and local-network play are coming next"
-	DrawText hint, (SCREEN_WIDTH - TextWidth(hint)) * 0.5, 605
+	Local hint:String = "The host can begin once at least two players are ready"
+	DrawText hint, (SCREEN_WIDTH - TextWidth(hint)) * 0.5, 625
 End Function
 
 ?macos Or ios
 Function DrawOnlinePanel()
 	If Not onlineJoined Then
+		Local providerLobby:IOnlineLobby
+		If online Then providerLobby = online.CurrentLobby()
+		If providerLobby Then
+			DrawGameKitMatchmakingLobby(providerLobby)
+			Return
+		End If
 		SetColor 8, 12, 22
 		SetAlpha 0.92
 		DrawRect 250, 205, 500, 380
 		SetAlpha 1.0
 		SetColor 235, 241, 250
-		DrawText "GAME CENTER QUICK MATCH", 391, 255
+		DrawText "FINDING PLAYERS", 420, 255
 		SetColor 224, 233, 247
 		DrawText statusText, 500 - TextWidth(statusText) * 0.5, 365
 		SetColor 145, 163, 191
@@ -1176,58 +1262,104 @@ Function DrawOnlinePanel()
 
 	SetColor 8, 12, 22
 	SetAlpha 0.92
-	DrawRect 160, 170, 680, 450
+	DrawRect 100, 155, 800, 475
 	SetAlpha 1.0
 	SetColor 235, 241, 250
-	DrawText "ONLINE LOBBY", 437, 208
-	SetColor 95, 160, 245
-	DrawOval 300, 252, 48, 48
-	SetColor 239, 82, 88
-	DrawOval 652, 252, 48, 48
-	SetColor 225, 234, 248
-	DrawText "PLAYER 1", 285, 310
-	DrawText "PLAYER 2", 637, 310
-	SetColor 145, 163, 191
-	If onlineHost Then
-		DrawText "HOST / YOU", 278, 334
-		DrawText "GUEST", 649, 334
-	Else
-		DrawText "HOST", 305, 334
-		DrawText "GUEST / YOU", 625, 334
-	End If
-	Local playerOneState:String = OnlineRoomPlayerState(0)
-	Local playerTwoState:String = OnlineRoomPlayerState(1)
-	SetColor 145, 163, 191
-	DrawText playerOneState, 324 - TextWidth(playerOneState) * 0.5, 358
-	DrawText playerTwoState, 676 - TextWidth(playerTwoState) * 0.5, 358
+	DrawText "MATCHMAKING GROUP", 404, 190
+	Local roomPlayers:Int = onlineDesiredPlayers
+	If onlineRoom Then roomPlayers = onlineRoom.MaxPlayers()
+	For Local player:Int = 0 Until roomPlayers
+		Local centreX:Float = 500
+		If roomPlayers > 1 Then centreX = 200 + Float(player) * 600.0 / Float(roomPlayers - 1)
+		SetPlayerColor player
+		DrawOval centreX - 24, 230, 48, 48
+		SetColor 225, 234, 248
+		Local playerLabel:String = "OPEN SLOT"
+		If Not onlineRoom Or onlineRoom.IsPresent(player) Then playerLabel = "PLAYER " + (player + 1)
+		DrawText playerLabel, centreX - TextWidth(playerLabel) * 0.5, 290
+		SetColor 145, 163, 191
+		Local roleLabel:String = "AVAILABLE"
+		If Not onlineRoom Or onlineRoom.IsPresent(player) Then
+			roleLabel = "GUEST"
+			If player = 0 Then roleLabel = "HOST"
+			If player = OnlineLocalPlayer() Then roleLabel :+ " / YOU"
+		End If
+		DrawText roleLabel, centreX - TextWidth(roleLabel) * 0.5, 314
+		Local playerState:String = OnlineRoomPlayerState(player)
+		DrawText playerState, centreX - TextWidth(playerState) * 0.5, 340
+	Next
 
 	SetColor 177, 190, 211
 	If onlineLobbyConfigReady Then
 		Local description:String = LobbyDescription()
-		DrawText description, (SCREEN_WIDTH - TextWidth(description)) * 0.5, 417
+		DrawText description, (SCREEN_WIDTH - TextWidth(description)) * 0.5, 392
 	Else
 		Local waiting:String = "WAITING FOR MATCH SETTINGS"
-		DrawText waiting, (SCREEN_WIDTH - TextWidth(waiting)) * 0.5, 417
+		DrawText waiting, (SCREEN_WIDTH - TextWidth(waiting)) * 0.5, 392
 	End If
 	If onlineHost And onlineLobbyConfigReady Then
-		DrawRoomButton 210, 405, 100, 52, "<", 58, 68, 91
-		DrawRoomButton 690, 405, 100, 52, ">", 58, 68, 91
+		DrawRoomButton 210, 380, 100, 52, "<", 58, 68, 91
+		DrawRoomButton 690, 380, 100, 52, ">", 58, 68, 91
 		SetColor 126, 143, 170
 		Local hostHint:String = "You are the host - choose the match"
-		DrawText hostHint, (SCREEN_WIDTH - TextWidth(hostHint)) * 0.5, 449
+		DrawText hostHint, (SCREEN_WIDTH - TextWidth(hostHint)) * 0.5, 435
 	Else
 		SetColor 126, 143, 170
 		Local guestHint:String = "The host chooses the match"
-		DrawText guestHint, (SCREEN_WIDTH - TextWidth(guestHint)) * 0.5, 449
+		DrawText guestHint, (SCREEN_WIDTH - TextWidth(guestHint)) * 0.5, 435
 	End If
 	SetColor 224, 233, 247
-	DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 478
-	If onlineRoom And onlineRoom.IsInRoom(0) And onlineRoom.IsInRoom(1) Then
+	DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 470
+	If onlineRoom And onlineRoom.AllPresentInRoom(2) Then
 		DrawLobbyButton 300, 515, "READY", 40, 115, 205
 	Else
 		DrawLobbyButton 300, 515, "WAITING", 58, 68, 91
 	End If
 	DrawLobbyButton 520, 515, "LEAVE", 89, 72, 142
+End Function
+
+Function DrawGameKitMatchmakingLobby(providerLobby:IOnlineLobby)
+	SetColor 8, 12, 22
+	SetAlpha 0.92
+	DrawRect 100, 155, 800, 475
+	SetAlpha 1.0
+	SetColor 235, 241, 250
+	DrawText "ONLINE LOBBY", 437, 190
+	For Local slot:Int = 0 Until providerLobby.MaxPlayers()
+		Local centreX:Float = 200 + Float(slot) * 600.0 / Float(providerLobby.MaxPlayers() - 1)
+		Local member:SOnlinePlayer
+		If slot < providerLobby.MemberCount() Then member = providerLobby.Member(slot)
+		If member.IsValid() Then
+			SetPlayerColor slot
+			DrawOval centreX - 24, 230, 48, 48
+			SetColor 225, 234, 248
+			Local name:String = member.DisplayName()
+			If name.Length = 0 Then name = "PLAYER " + (slot + 1)
+			DrawText name, centreX - TextWidth(name) * 0.5, 290
+			SetColor 145, 163, 191
+			Local role:String = "READY"
+			If member.Id() = providerLobby.Owner().Id() Then role = "HOST"
+			If member.IsLocal() Then role :+ " / YOU"
+			DrawText role, centreX - TextWidth(role) * 0.5, 320
+		Else
+			SetColor 58, 68, 91
+			DrawOval centreX - 24, 230, 48, 48
+			SetColor 145, 163, 191
+			DrawText "OPEN SLOT", centreX - TextWidth("OPEN SLOT") * 0.5, 290
+			DrawText "WAITING", centreX - TextWidth("WAITING") * 0.5, 320
+		End If
+	Next
+	SetColor 224, 233, 247
+	DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 430
+	If providerLobby.Owner().IsLocal() And providerLobby.MemberCount() >= 2 Then
+		DrawLobbyButton 300, 515, "START", 40, 115, 205
+	Else
+		DrawLobbyButton 300, 515, "WAITING", 58, 68, 91
+	End If
+	DrawLobbyButton 520, 515, "LEAVE", 89, 72, 142
+	SetColor 126, 143, 170
+	Local hint:String = "The host starts when the group is ready"
+	DrawText hint, (SCREEN_WIDTH - TextWidth(hint)) * 0.5, 600
 End Function
 
 Function OnlineRoomPlayerState:String(player:Int)

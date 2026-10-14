@@ -214,10 +214,13 @@ Type TGameKitOnlineService Implements IOnlineService
 	Field _nextRequestId:UInt = 1
 	Field _openRequestId:UInt
 	Field _matchRequestId:UInt
+	Field _finishRequestId:UInt
 	Field _nativeMatchRequestId:Int
 	Field _minimumPlayers:Int
 	Field _maximumPlayers:Int
 	Field _pendingMatch:TGameCenterMatch
+	Field _pendingLobby:TGameKitMatchmakingLobby
+	Field _pendingMemberCount:Int
 	Field _readyTransport:TGameKitTransport
 	Field _readyRequestId:UInt
 	Field _readyMatchInfo:SOnlineMatchInfo
@@ -327,6 +330,11 @@ Type TGameKitOnlineService Implements IOnlineService
 
 	Method Pump() Override
 		If Not _pendingMatch Or _readyTransport Then Return
+		Local memberCount:Int = _pendingMatch.PlayerCount() + 1
+		If memberCount <> _pendingMemberCount Then
+			_pendingMemberCount = memberCount
+			Queue(New SOnlineEvent(EOnlineEventKind.LobbyChanged, EOnlineOperation.StartMatchmaking, _matchRequestId, EOnlineError.None, 0, "gamekit-match", New SOnlinePlayer, ""))
+		End If
 		If _pendingMatch.ExpectedPlayerCount() <> 0 Then Return
 		If _pendingMatch.PlayerCount() < _minimumPlayers - 1 Then Return
 		Local hostIndex:Int = GameKitElectedHostIndex(_pendingMatch, _gameCenter.localPlayer)
@@ -360,10 +368,18 @@ Type TGameKitOnlineService Implements IOnlineService
 		If hostIndex > 0 Then hostPeer = New SNetPeer(UInt(hostIndex), 1)
 		_readyMatchInfo = New SOnlineMatchInfo(_pendingMatch.PlayerCount() + 1, hostIndex = 0, hostPeer)
 		_pendingMatch = Null
+		Local readyOperation:EOnlineOperation = EOnlineOperation.StartMatchmaking
 		_readyRequestId = _matchRequestId
-		Queue(New SOnlineEvent(EOnlineEventKind.MatchReady, EOnlineOperation.StartMatchmaking, _matchRequestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))
+		If _finishRequestId Then
+			readyOperation = EOnlineOperation.StartMatch
+			_readyRequestId = _finishRequestId
+		End If
+		Queue(New SOnlineEvent(EOnlineEventKind.MatchReady, readyOperation, _readyRequestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))
 		_matchRequestId = 0
+		_finishRequestId = 0
 		_nativeMatchRequestId = 0
+		_pendingLobby = Null
+		_pendingMemberCount = 0
 	End Method
 
 	Method Poll:Int(event:SOnlineEvent Var) Override
@@ -395,7 +411,7 @@ Type TGameKitOnlineService Implements IOnlineService
 	End Method
 
 	Method CurrentLobby:IOnlineLobby() Override
-		Return Null
+		Return _pendingLobby
 	End Method
 
 	Method JoinLobby:UInt(lobbyId:String) Override
@@ -415,6 +431,7 @@ Type TGameKitOnlineService Implements IOnlineService
 		If _matchRequestId Or _pendingMatch Or _readyTransport Then Return 0
 		If request.minPlayers < 2 Or request.maxPlayers < request.minPlayers Or request.maxPlayers > _maximumPeers + 1 Then Return 0
 		_matchRequestId = NextRequestId()
+		_finishRequestId = 0
 		_minimumPlayers = request.minPlayers
 		_maximumPlayers = request.maxPlayers
 		_nativeMatchRequestId = _gameCenter.FindMatch(request.minPlayers, request.maxPlayers)
@@ -428,14 +445,57 @@ Type TGameKitOnlineService Implements IOnlineService
 		_gameCenter.CancelMatchmaking()
 		If _pendingMatch Then _pendingMatch.Disconnect()
 		_pendingMatch = Null
+		_pendingLobby = Null
+		_pendingMemberCount = 0
 		_matchRequestId = 0
+		_finishRequestId = 0
 		_nativeMatchRequestId = 0
 		Queue(New SOnlineEvent(EOnlineEventKind.MatchmakingCancelled, EOnlineOperation.CancelMatchmaking, cancelRequestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))
 		Return cancelRequestId
 	End Method
 
 	Method StartMatch:UInt() Override
-		Return 0
+		If Not _pendingMatch Or _finishRequestId Or PendingPlayerCount() < _minimumPlayers Or Not IsPendingLobbyOwner() Then Return 0
+		_finishRequestId = NextRequestId()
+		_pendingMatch.FinishMatchmaking()
+		Return _finishRequestId
+	End Method
+
+	Rem
+	bbdoc: Returns the number of players currently assembled by Game Center.
+	End Rem
+	Method PendingPlayerCount:Int()
+		If Not _pendingMatch Then Return 0
+		Return _pendingMatch.PlayerCount() + 1
+	End Method
+
+	Rem
+	bbdoc: Returns True when the local player owns the pending matchmaking lobby.
+	End Rem
+	Method IsPendingLobbyOwner:Int()
+		Return _pendingMatch And GameKitElectedHostIndex(_pendingMatch, _gameCenter.localPlayer) = 0
+	End Method
+
+	Method PendingLobbyMember:SOnlinePlayer(index:Int)
+		If Not _pendingMatch Or index < 0 Or index >= PendingPlayerCount() Then Return New SOnlinePlayer
+		If index = 0 Then Return OnlinePlayer(_gameCenter.localPlayer, True)
+		Return OnlinePlayer(_pendingMatch.Player(index), False)
+	End Method
+
+	Method PendingLobbyOwner:SOnlinePlayer()
+		If Not _pendingMatch Then Return New SOnlinePlayer
+		Local hostIndex:Int = GameKitElectedHostIndex(_pendingMatch, _gameCenter.localPlayer)
+		If hostIndex = 0 Then Return OnlinePlayer(_gameCenter.localPlayer, True)
+		If hostIndex > 0 Then Return OnlinePlayer(_pendingMatch.Player(hostIndex), False)
+		Return New SOnlinePlayer
+	End Method
+
+	Method PendingLobbyJoinable:Int()
+		Return _pendingMatch And _finishRequestId = 0 And _pendingMatch.ExpectedPlayerCount() > 0
+	End Method
+
+	Method PendingLobbyMaxPlayers:Int()
+		Return _maximumPlayers
 	End Method
 
 	Method MatchInfo:Int(requestId:UInt, info:SOnlineMatchInfo Var) Override
@@ -464,8 +524,11 @@ Type TGameKitOnlineService Implements IOnlineService
 		If _pendingMatch Then _pendingMatch.Disconnect()
 		If _readyTransport Then _readyTransport.Close()
 		_pendingMatch = Null
+		_pendingLobby = Null
+		_pendingMemberCount = 0
 		_readyTransport = Null
 		_matchRequestId = 0
+		_finishRequestId = 0
 		_readyRequestId = 0
 		_readyMatchInfo = New SOnlineMatchInfo
 		_nativeMatchRequestId = 0
@@ -509,6 +572,9 @@ Type TGameKitOnlineService Implements IOnlineService
 			Return
 		End If
 		_pendingMatch = match
+		_pendingLobby = New TGameKitMatchmakingLobby(Self)
+		_pendingMemberCount = match.PlayerCount() + 1
+		Queue(New SOnlineEvent(EOnlineEventKind.LobbyJoined, EOnlineOperation.StartMatchmaking, _matchRequestId, EOnlineError.None, 0, "gamekit-match", New SOnlinePlayer, ""))
 	End Method
 
 	Method OnGameCenterAchievementReported(requestId:Int, identifier:String, error:TGameCenterError)
@@ -533,5 +599,48 @@ Type TGameKitOnlineService Implements IOnlineService
 
 	Method OnGameCenterViewDismissed(view:EGameCenterView)
 		If _previousListener Then _previousListener.OnGameCenterViewDismissed(view)
+	End Method
+End Type
+
+Private
+
+Type TGameKitMatchmakingLobby Implements IOnlineLobby
+	Field _service:TGameKitOnlineService
+	Field _properties:TOnlineProperties = New TOnlineProperties
+
+	Method New(service:TGameKitOnlineService)
+		_service = service
+	End Method
+
+	Method Id:String()
+		Return "gamekit-match"
+	End Method
+
+	Method Name:String()
+		Return "Game Center Match"
+	End Method
+
+	Method Owner:SOnlinePlayer()
+		Return _service.PendingLobbyOwner()
+	End Method
+
+	Method MaxPlayers:Int()
+		Return _service.PendingLobbyMaxPlayers()
+	End Method
+
+	Method IsJoinable:Int()
+		Return _service.PendingLobbyJoinable()
+	End Method
+
+	Method MemberCount:Int()
+		Return _service.PendingPlayerCount()
+	End Method
+
+	Method Member:SOnlinePlayer(index:Int)
+		Return _service.PendingLobbyMember(index)
+	End Method
+
+	Method Properties:TOnlineProperties()
+		Return _properties
 	End Method
 End Type

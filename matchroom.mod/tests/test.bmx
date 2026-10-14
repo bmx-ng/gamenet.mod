@@ -44,6 +44,7 @@ CheckRoom(hostRoom.PlayerJoined(hostPeer) = ETransportResult.Ok, "host adds clie
 CheckRoom(clientRoom.PlayerJoined(clientPeer) = ETransportResult.Ok, "client binds host")
 PumpRooms(hostSession, clientSession, hostRoom, clientRoom, 1)
 CheckRoom(hostRoom.LocalPlayer() = 0 And clientRoom.LocalPlayer() = 1, "stable player slots")
+CheckRoom(hostRoom.PlayerForSessionPeer(hostPeer) = 1 And hostRoom.SessionPeer(1).Equals(hostPeer), "peer and slot lookup")
 CheckRoom(hostRoom.MemberCount() = 2 And clientRoom.MemberCount() = 2, "synchronized roster")
 CheckRoom(hostRoom.IsInRoom(0) And hostRoom.IsInRoom(1), "players begin in staging")
 

@@ -10,6 +10,13 @@ transports are filtered to that host before ownership is transferred.
 The adapter advertises `Matchmaking` and `MatchTransport`. It does not pretend
 that Game Center automatching is a searchable lobby service.
 
+When a request permits a player range, `CurrentLobby` exposes the temporary
+group assembled by Game Center after the minimum player count is reached.
+`LobbyJoined` and `LobbyChanged` report its arrival and changing membership.
+The deterministically elected owner may call `StartMatch` to stop filling the
+remaining places and continue with the players currently present. This is a
+matchmaking lobby, not a named, searchable, or persistent provider lobby.
+
 Game Center has one process-wide listener. Create this adapter after installing
 any `Apple.GameKit` listener used by the rest of the application. While open,
 the adapter forwards authentication, achievement, leaderboard, and dashboard

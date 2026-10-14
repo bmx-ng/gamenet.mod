@@ -11,7 +11,8 @@ smooth on Retina displays. Cascades are shown one atomic topple at a time
 instead of jumping directly to the resolved board. The presentation currently
 uses a 100 ms delay per topple; this can later become a game option.
 Counter quantities are shown as pips rather than digits. A cell wobbles when
-its next counter will make it topple.
+its next counter will make it topple. A compact balance chart shows each
+player's share of all counters and updates at every animated cascade step.
 
 The first implementation is a local rules playground with five layouts:
 
@@ -36,3 +37,18 @@ owners and counter totals.
 `test_rules.bmx` verifies square and hex construction, reflected boundaries,
 starting counters, legal turns, corner toppling, retained excess counters and
 deterministic state hashes.
+
+`protocol.bmx` defines compact backend-neutral messages for online matches:
+room configuration and readiness, validated match configuration and starting
+player, move requests, authoritative applied moves, and post-move state
+hashes. On Apple targets the Multiplayer menu offers Game Center quick match.
+Matched players enter a persistent room where the host selects a square or hex
+duel and both players ready up before play. After a match, each player returns
+to the lobby independently; the lobby shows when the other player is still on
+the results screen and does not permit another ready-up until both return.
+GameKit supplies matchmaking and transport, while a GameNet session elects
+the authority and carries the same deterministic protocol that another
+backend could use later.
+
+`test_protocol.bmx` verifies strict packet decoding and proves that host and
+client games remain identical while replaying transmitted moves.

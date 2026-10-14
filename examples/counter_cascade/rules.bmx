@@ -198,7 +198,7 @@ Type TCascadeGame
 		Return game
 	End Function
 
-	Method Reset()
+	Method Reset(startingPlayer:Int = 0)
 		For Local cell:Int = 0 Until board.CellCount()
 			owners[cell] = 0
 			counters[cell] = 0
@@ -210,7 +210,8 @@ Type TCascadeGame
 			counters[cell] = startingCounters
 			alive[player] = True
 		Next
-		currentPlayer = 0
+		If startingPlayer < 0 Or startingPlayer >= board.playerCount Then startingPlayer = 0
+		currentPlayer = startingPlayer
 		winner = -1
 		turn = 0
 		lastTopples = 0

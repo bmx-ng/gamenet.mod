@@ -38,6 +38,7 @@ Import "glue.c"
 
 Extern
 	Function bmx_gamenet_enet_address_create:Byte Ptr(address:String, port:Int)
+	Function bmx_gamenet_enet_local_ipv4_address:String()
 End Extern
 
 Private
@@ -54,6 +55,17 @@ Struct SENetPeerSlot
 End Struct
 
 Public
+
+Rem
+bbdoc: Returns a non-loopback IPv4 address suitable for another device on the local network.
+returns: A local IPv4 address, or an empty string when none can be found.
+about: When several interfaces are active, a Wi-Fi interface and a private LAN
+address are preferred. The result is intended for local discovery displays and
+manual connection entry; it does not describe an Internet-reachable address.
+End Rem
+Function ENetLocalIPv4Address:String()
+	Return bmx_gamenet_enet_local_ipv4_address()
+End Function
 
 Rem
 bbdoc: A GameNet transport backed by ENet.

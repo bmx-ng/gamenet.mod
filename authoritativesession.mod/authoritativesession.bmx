@@ -173,6 +173,9 @@ Type TAuthoritativeClientSession
 	Field _failureReason:EAuthoritativeSessionFailure
 	Field _rejectedPackets:Int
 	Field _snapshotsReceived:ULong
+	Field _renderObserved:Int
+	Field _renderTick:Double
+	Field _renderMillis:Int
 
 	Method New(config:SAuthoritativeSessionConfig)
 		_config = config
@@ -261,6 +264,9 @@ Type TAuthoritativeClientSession
 		_failureReason = EAuthoritativeSessionFailure.None
 		_rejectedPackets = 0
 		_snapshotsReceived = 0
+		_renderObserved = False
+		_renderTick = 0.0
+		_renderMillis = 0
 	End Method
 
 	Rem
@@ -390,11 +396,38 @@ Type TAuthoritativeClientSession
 	End Method
 
 	Rem
-	bbdoc: Returns the estimated server render tick including adaptive delay.
+	bbdoc: Returns a monotonic estimated server render tick including adaptive delay.
+	about: Changes in observed packet timing can raise or lower the desired
+	interpolation delay. The presentation cursor approaches that desired time by
+	slightly changing its rate instead of jumping backwards or forwards. This
+	prevents visible reversal when a burst of delayed snapshots increases the
+	jitter buffer.
 	End Rem
 	Method RenderTick:Double(localMillis:Int)
 		If Not _clock.IsObserved() Then Return 0.0
-		Return _clock.Estimate(localMillis) - Double(_delay.DelayTicks())
+		Local desired:Double = _clock.Estimate(localMillis) - Double(_delay.DelayTicks())
+		If Not _renderObserved Then
+			_renderObserved = True
+			_renderTick = desired
+			_renderMillis = localMillis
+			Return _renderTick
+		End If
+		Local elapsedMillis:Int = Int(localMillis - _renderMillis)
+		If elapsedMillis < 0 Then elapsedMillis = 0
+		_renderMillis = localMillis
+		Local advance:Double = Double(elapsedMillis) * _config.ticksPerSecond / 1000.0
+		Local nextTick:Double = _renderTick + advance
+		Local error:Double = desired - nextTick
+		If error > 0.0 Then
+			' Recover missing buffer gradually at up to 25 percent above real time.
+			nextTick :+ Min(error, advance * 0.25)
+		Else If error < 0.0 Then
+			' Grow the buffer gradually, but never reverse presentation time.
+			nextTick :- Min(-error, advance * 0.75)
+		End If
+		If nextTick < _renderTick Then nextTick = _renderTick
+		_renderTick = nextTick
+		Return _renderTick
 	End Method
 
 	Method ClearEntity(entity:Int)
@@ -414,6 +447,9 @@ Type TAuthoritativeClientSession
 		Next
 		_clock.Clear()
 		_delay.Clear()
+		_renderObserved = False
+		_renderTick = 0.0
+		_renderMillis = 0
 		_recovering = True
 		Return True
 	End Method

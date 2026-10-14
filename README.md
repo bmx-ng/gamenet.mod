@@ -9,7 +9,7 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.Loopback` provides an in-process, preallocated transport for tests,
   local multiplayer, and protocol development.
 - `GameNet.ENet` provides UDP networking through ENet for direct and hosted
-  connections.
+  connections, including local-address discovery for LAN join screens.
 - `GameNet.GameKit` adapts Apple Game Center real-time matches to the common
   transport contract on macOS and iOS.
 - `GameNet.GameKitOnline` adapts Game Center authentication and programmatic
@@ -43,6 +43,13 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.AuthoritativeSession` composes bounded prediction and snapshot
   storage into reusable client/server orchestration with redundant input,
   acknowledgement, reconciliation, interpolation, and adaptive render delay.
+- `GameNet.Replication` provides a GNet-style schema and replicated-entity
+  facade with stable identities, typed fields, ownership, reliable changed
+  fields or periodic full unreliable snapshots, late-join state, schema
+  compatibility checks, bounded custom field codecs, per-peer relevance, and
+  bounded update batching with traffic diagnostics, priority scheduling,
+  per-peer byte budgets, complete-state catch-up, and bounded bidirectional
+  entity messages above a session.
 - `GameNet.Rollback` optionally stores deterministic frame state and predicted
   input, reporting the earliest frame which requires re-simulation.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a
@@ -96,6 +103,13 @@ matchmaking into a playable two-player fixed-point rollback game with touch and
 keyboard input, destructible shields, power returns, deterministic collisions,
 state hashes, full-state recovery, confirmed effects, and a transport-neutral
 `GameNet.Match` lifecycle for ready-up, countdown, completion, and rematches.
+
+[`examples/orbital_salvage`](examples/orbital_salvage) is a playable
+authoritative game built around `GameNet.Replication`, with launchers for both
+GameKit matchmaking and direct ENet play on a local network. Two pilots collect
+and steal energy cores using replicated entities, reliable score state,
+unreliable movement snapshots, bounded player commands and pulse effects,
+priority scheduling, entity destruction, and respawn.
 
 [`examples/steam_sockets_ip`](examples/steam_sockets_ip) verifies a Steam
 Networking Sockets connection and packet exchange over local IP. The companion

@@ -84,6 +84,15 @@
 /examples/orbital_salvage/gamekit_orbital_salvage.xcodeproj/
 /examples/orbital_salvage/gamekitorbitalsalvage.entitlements
 /examples/orbital_salvage/main.m
+/examples/counter_cascade/counter_cascade
+/examples/counter_cascade/test_rules
+/examples/counter_cascade/test_protocol
+/examples/counter_cascade/Assets.xcassets/
+/examples/counter_cascade/Info.plist
+/examples/counter_cascade/LaunchScreen.storyboard
+/examples/counter_cascade/countercascade.entitlements
+/examples/counter_cascade/counter_cascade.xcodeproj/
+/examples/counter_cascade/main.m
 /examples/steam_session/steam_session
 /examples/steam_session/steam_appid.txt
 /examples/steam_session/libsteam_api.dylib

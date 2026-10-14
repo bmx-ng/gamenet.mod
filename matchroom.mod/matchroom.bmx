@@ -604,6 +604,25 @@ Type TMatchRoom
 		Return _localPlayer
 	End Method
 
+	Method MaxPlayers:Int()
+		Return _config.maxPlayers
+	End Method
+
+	Rem
+	bbdoc: Returns the stable room slot assigned to a session peer, or -1.
+	End Rem
+	Method PlayerForSessionPeer:Int(peer:SNetPeer)
+		Return PlayerForPeer(peer)
+	End Method
+
+	Rem
+	bbdoc: Returns the session peer assigned to a remote room slot.
+	End Rem
+	Method SessionPeer:SNetPeer(player:Int)
+		If player < 0 Or player >= _config.maxPlayers Or Not _peerBound[player] Then Return New SNetPeer
+		Return _peers[player]
+	End Method
+
 	Method Round:UInt()
 		Return _round
 	End Method
@@ -648,6 +667,10 @@ Type TMatchRoom
 
 	Method AllPresentReady:Int(minimumPlayers:Int = 2)
 		Return MemberCount() >= minimumPlayers And _inRoomMask = _presentMask And _readyMask = _presentMask
+	End Method
+
+	Method AllPresentInRoom:Int(minimumPlayers:Int = 2)
+		Return MemberCount() >= minimumPlayers And _inRoomMask = _presentMask
 	End Method
 
 	Method DroppedEvents:Int()

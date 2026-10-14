@@ -111,6 +111,12 @@ and steal energy cores using replicated entities, reliable score state,
 unreliable movement snapshots, bounded player commands and pulse effects,
 priority scheduling, entity destruction, and respawn.
 
+[`examples/counter_cascade`](examples/counter_cascade) begins a deterministic
+turn-based game for two to four players. Its data-driven route tables support
+rectangular and hexagonal Max2D grids, reflected boundaries, configurable board
+sizes, canonical cascades, elimination, state hashes, cycle protection, and a
+local rules playground for all supported player counts.
+
 [`examples/steam_sockets_ip`](examples/steam_sockets_ip) verifies a Steam
 Networking Sockets connection and packet exchange over local IP. The companion
 [`examples/steam_sockets_dedicated`](examples/steam_sockets_dedicated) shows a

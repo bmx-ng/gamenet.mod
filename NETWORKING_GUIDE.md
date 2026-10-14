@@ -61,6 +61,16 @@ feature, and use its native adapter API when the game needs something outside
 the shared lobby-and-match flow. Direct ENet remains available and does not
 require `GameNet.Online`.
 
+Once a transport and `TNetSession` exist, `GameNet.MatchRoom` supplies the
+portable staging layer. The elected session host owns a dynamic roster of up
+to sixteen slots, an opaque game-defined configuration, ready state, round
+number, and shared seed. This is deliberately distinct from a provider lobby:
+Steam or EOS can use their backend lobby for discovery and invitations, while
+GameKit or direct LAN play can run the same staging protocol over the newly
+connected transport. Each game still chooses its own room limit; for example,
+a four-player game creates a four-slot room even though the module supports
+more.
+
 `GameNet.SteamOnline` is the first lobby-oriented provider. It maps Steam lobby
 metadata and membership into `IOnlineLobby`, uses the lobby owner as the
 GameNet session host, and yields a Steam peer transport when the match starts.

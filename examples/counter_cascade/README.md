@@ -38,10 +38,10 @@ owners and counter totals.
 starting counters, legal turns, corner toppling, retained excess counters and
 deterministic state hashes.
 
-`protocol.bmx` defines compact backend-neutral messages for online matches:
-room configuration and readiness, validated match configuration and starting
-player, move requests, authoritative applied moves, and post-move state
-hashes. On Apple targets the Multiplayer menu offers Game Center quick match.
+`protocol.bmx` defines compact backend-neutral messages for online moves and
+state recovery. `GameNet.MatchRoom` carries the room configuration, readiness,
+round and shared starting state. On Apple targets the Multiplayer menu offers
+Game Center quick match.
 Matched players enter a persistent room where the host selects a square or hex
 duel and both players ready up before play. After a match, each player returns
 to the lobby independently; the lobby shows when the other player is still on
@@ -54,3 +54,6 @@ backend could use later.
 client games remain identical while replaying transmitted moves. If a client
 nevertheless detects a turn or state-hash disagreement, it requests a bounded
 full-state snapshot and validates it completely before replacing local state.
+Move acknowledgements and recovery requests both use bounded retries. An
+unanswered move falls back to state recovery, while a peer that cannot provide
+recovery returns the player to Multiplayer rather than leaving a frozen match.

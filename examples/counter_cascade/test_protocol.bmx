@@ -98,12 +98,8 @@ Local clientPeer:SNetPeer = sessionEvent.Peer()
 
 Local networkConfig:SCascadeMatchConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, 1)
 Local configLength:Size_T = EncodeCascadeConfig(Byte Ptr(packet), Size_T(packet.Length), networkConfig)
-CheckProtocol(hostSession.Send(hostPeer, CASCADE_MSG_ROOM_CONFIG, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(packet), configLength) = ETransportResult.Ok, "host sends lobby selection")
-CheckProtocol(clientSession.PollAt(sessionEvent, 1) And sessionEvent.Kind() = ESessionEventKind.Message And sessionEvent.MessageType() = CASCADE_MSG_ROOM_CONFIG, "client receives lobby selection")
 Local lobbySelection:SCascadeMatchConfig
-CheckProtocol(DecodeCascadeConfig(sessionEvent.Payload(), lobbySelection) And lobbySelection.layout = networkConfig.layout, "client decodes lobby selection")
-CheckProtocol(hostSession.Send(hostPeer, CASCADE_MSG_CONFIG, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(packet), configLength) = ETransportResult.Ok, "host sends match configuration")
-CheckProtocol(clientSession.PollAt(sessionEvent, 2) And sessionEvent.Kind() = ESessionEventKind.Message And sessionEvent.MessageType() = CASCADE_MSG_CONFIG, "client receives match configuration")
+CheckProtocol(DecodeCascadeConfig(New SPacketView(Byte Ptr(packet), configLength), lobbySelection) And lobbySelection.layout = networkConfig.layout, "decode room configuration payload")
 
 Local networkHost:TCascadeGame = TCascadeGame.Create(networkConfig.CreateBoard())
 Local networkClient:TCascadeGame = TCascadeGame.Create(networkConfig.CreateBoard())

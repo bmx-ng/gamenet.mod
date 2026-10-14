@@ -9,6 +9,7 @@ Import BRL.PNGLoader
 
 ?macos Or ios
 Import GameNet.GameKitOnline
+Import GameNet.MatchRoom
 Import GameNet.Online
 Import GameNet.Session
 ?
@@ -22,6 +23,10 @@ Include "protocol.bmx"
 Const SCREEN_WIDTH:Int = 1000
 Const SCREEN_HEIGHT:Int = 700
 Const DEFAULT_CASCADE_STEP_MILLIS:Int = 100
+Const ONLINE_RETRY_MILLIS:UInt = 750
+Const ONLINE_MAX_MOVE_RETRIES:Int = 8
+Const ONLINE_RECOVERY_RETRY_MILLIS:UInt = 1000
+Const ONLINE_MAX_RECOVERY_RETRIES:Int = 4
 
 Enum ECascadeMenuPage
 	Main
@@ -71,6 +76,7 @@ Global online:IOnlineService
 Global onlineRequest:UInt
 Global onlineTransport:INetTransport
 Global onlineSession:TNetSession
+Global onlineRoom:TMatchRoom
 Global onlinePeer:SNetPeer
 Global onlineHost:Int
 Global onlineJoined:Int
@@ -80,12 +86,10 @@ Global onlineWaitingForMove:Int
 Global onlineMoveRequest:SCascadeMoveRequest
 Global onlineMoveSentAt:UInt
 Global onlineMoveRetries:Int
-Global onlineLocalReady:Int
-Global onlineRemoteReady:Int
-Global onlineLocalInRoom:Int
-Global onlineRemoteInRoom:Int
 Global onlineLobbyConfigReady:Int
 Global onlineResyncPending:Int
+Global onlineResyncSentAt:UInt
+Global onlineResyncRetries:Int
 Global pendingMoveRequest:SCascadeMoveRequest
 Global hasPendingMoveRequest:Int
 Global pendingAppliedMove:SCascadeAppliedMove
@@ -435,14 +439,11 @@ Function BeginOnlineSession(requestId:UInt)
 	hasPendingMoveRequest = False
 	hasPendingAppliedMove = False
 	hasLastAppliedMove = False
-		onlineMoveRetries = 0
-		onlineLocalReady = False
-		onlineRemoteReady = False
-		onlineLocalInRoom = False
-		onlineRemoteInRoom = False
-		onlineLobbyConfigReady = False
-		onlineResyncPending = False
-		onlineDebugText = ""
+	onlineMoveRetries = 0
+	onlineLobbyConfigReady = False
+	onlineResyncPending = False
+	onlineResyncRetries = 0
+	onlineDebugText = ""
 	If onlineHost Then
 		onlineSession = TNetSession.CreateHost(onlineTransport, CASCADE_APP_ID, CASCADE_APP_VERSION, 1, 900)
 	Else
@@ -450,6 +451,18 @@ Function BeginOnlineSession(requestId:UInt)
 	End If
 	If Not onlineSession Then
 		statusText = "Could not create the Counter Cascade session"
+		Return
+	End If
+	Local roomConfig:SMatchRoomConfig = New SMatchRoomConfig(2, CASCADE_ROOM_COMMAND_MESSAGE, CASCADE_ROOM_STATE_MESSAGE, CASCADE_CONTROL_CHANNEL, 32, 32)
+	If onlineHost Then
+		onlineRoom = TMatchRoom.CreateHost(onlineSession, roomConfig)
+	Else
+		onlineRoom = TMatchRoom.CreateClient(onlineSession, info.SessionHostPeer(), roomConfig)
+	End If
+	If Not onlineRoom Then
+		statusText = "Could not create the Counter Cascade room"
+		onlineSession.Close()
+		onlineSession = Null
 		Return
 	End If
 	onlineSession.ConfigureHealth(New SSessionHealthConfig(10000, 15000, 500, 2000))
@@ -483,6 +496,7 @@ Function PollOnlineGame()
 	If onlineSession Then PollOnlineSession()
 	ProcessPendingOnlineMove()
 	RetryOnlineMove()
+	RetryOnlineStateRequest()
 End Function
 
 Function PollOnlineSession()
@@ -494,20 +508,28 @@ Function PollOnlineSession()
 			Case ESessionEventKind.Joined
 				onlinePeer = sessionEvent.Peer()
 				onlineJoined = True
-				onlineLocalInRoom = True
-				onlineRemoteInRoom = True
+				If onlineRoom.PlayerJoined(onlinePeer) <> ETransportResult.Ok Then
+					ReturnToMultiplayerAfterFailure("Could not join the online room")
+					Return
+				End If
 				If onlineHost Then
 					lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, MilliSecs() Mod 2)
 					ResetPlayerColours()
-					onlineLobbyConfigReady = True
-					EnterOnlineRoom(False)
-					SendOnlineLobbyConfig()
-					statusText = "Choose a match, then ready up"
+					If PublishOnlineLobbyConfig() Then
+						onlineLobbyConfigReady = True
+						statusText = "Choose a match, then ready up"
+					Else
+						statusText = "Could not publish the match settings"
+					End If
 				Else
 					statusText = "Connected; waiting for the host..."
 				End If
 			Case ESessionEventKind.Message
-				ReceiveOnlineMessage(sessionEvent)
+				If onlineRoom And onlineRoom.HandlesMessageType(sessionEvent.MessageType()) Then
+					If Not onlineRoom.Receive(sessionEvent.Peer(), sessionEvent.MessageType(), sessionEvent.Payload()) Then statusText = "Invalid online room message"
+				Else
+					ReceiveOnlineMessage(sessionEvent)
+				End If
 			Case ESessionEventKind.Left
 				ReturnToMultiplayerAfterFailure("The other player left the match")
 				Return
@@ -518,7 +540,9 @@ Function PollOnlineSession()
 				ReturnToMultiplayerAfterFailure("Counter Cascade session error " + sessionEvent.Code())
 				Return
 		End Select
+		ProcessOnlineRoomEvents()
 	Wend
+	ProcessOnlineRoomEvents()
 End Function
 
 Function ReturnToMultiplayerAfterFailure(message:String)
@@ -530,39 +554,15 @@ Function ReturnToMultiplayerAfterFailure(message:String)
 	statusText = message
 End Function
 
-Function SendOnlineConfig()
-	Local length:Size_T = EncodeCascadeConfig(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length), lobbyConfig)
-	If length = 0 Or onlineSession.Send(onlinePeer, CASCADE_MSG_CONFIG, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) <> ETransportResult.Ok Then
-		statusText = "Could not send the match setup"
-	End If
-End Function
-
-Function SendOnlineLobbyConfig:Int()
-	If Not onlineHost Or Not onlineLobbyConfigReady Then Return False
+Function PublishOnlineLobbyConfig:Int()
+	If Not onlineHost Or Not onlineRoom Then Return False
 	Local length:Size_T = EncodeCascadeConfig(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length), lobbyConfig)
 	If length = 0 Then Return False
-	Return onlineSession.Send(onlinePeer, CASCADE_MSG_ROOM_CONFIG, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) = ETransportResult.Ok
+	Return onlineRoom.SetConfiguration(New SPacketView(Byte Ptr(onlinePacket), length)) = ETransportResult.Ok
 End Function
 
 Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 	Select sessionEvent.MessageType()
-		Case CASCADE_MSG_CONFIG
-			If onlineHost Then Return
-			Local config:SCascadeMatchConfig
-			If Not DecodeCascadeConfig(sessionEvent.Payload(), config) Or config.playerCount <> 2 Then
-				statusText = "The host sent an invalid match setup"
-				Return
-			End If
-			lobbyConfig = config
-			onlineLobbyConfigReady = True
-			ResetPlayerColours()
-			onlineLocalReady = False
-			onlineRemoteReady = False
-			onlineLocalInRoom = False
-			onlineRemoteInRoom = False
-			StartConfiguredMatch()
-			onlineResyncPending = False
-			statusText = "Connected - you are Player 2"
 		Case CASCADE_MSG_MOVE_REQUEST
 			If Not onlineHost Or hasPendingMoveRequest Then Return
 			Local request:SCascadeMoveRequest
@@ -580,39 +580,13 @@ Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 				pendingAppliedMove = move
 				hasPendingAppliedMove = True
 			End If
-		Case CASCADE_MSG_ROOM_READY
-			If Not onlineLocalInRoom Or Not onlineRemoteInRoom Then Return
-			onlineRemoteReady = True
-			TryStartOnlineRound()
-		Case CASCADE_MSG_RETURN_TO_ROOM
-			onlineRemoteInRoom = True
-			onlineRemoteReady = False
-			If game And game.winner < 0 Then
-				' Returning during play abandons the current match for both players.
-				EnterOnlineRoom(False)
-			Else If onlineLocalInRoom Then
-				statusText = "Both players are in the online lobby"
-			Else
-				statusText = "The other player returned to the lobby"
-			End If
-		Case CASCADE_MSG_ROOM_CONFIG
-			If onlineHost Then Return
-			Local roomConfig:SCascadeMatchConfig
-			If Not DecodeCascadeConfig(sessionEvent.Payload(), roomConfig) Or roomConfig.playerCount <> 2 Then
-				statusText = "The host sent invalid room settings"
-				Return
-			End If
-			lobbyConfig = roomConfig
-			onlineLobbyConfigReady = True
-			onlineLocalReady = False
-			onlineRemoteReady = False
-			statusText = "The host selected " + LobbyDescription()
 		Case CASCADE_MSG_STATE_REQUEST
 			If onlineHost And sessionEvent.Payload().Length() = 0 Then SendOnlineState()
 		Case CASCADE_MSG_STATE
 			If onlineHost Or Not game Then Return
 			If DecodeCascadeState(sessionEvent.Payload(), game) Then
 				onlineResyncPending = False
+				onlineResyncRetries = 0
 				onlineWaitingForMove = False
 				hasPendingAppliedMove = False
 				animationActive = False
@@ -638,8 +612,10 @@ End Function
 Function RequestOnlineState(reason:String)
 	If onlineHost Or Not onlineSession Or Not onlineJoined Or Not game Then Return
 	If onlineResyncPending Then Return
-	If SendOnlineRoomMessage(CASCADE_MSG_STATE_REQUEST) Then
+	If SendOnlineControlMessage(CASCADE_MSG_STATE_REQUEST) Then
 		onlineResyncPending = True
+		onlineResyncSentAt = UInt(MilliSecs())
+		onlineResyncRetries = 0
 		onlineWaitingForMove = False
 		statusText = "Recovering match state from the host..."
 		onlineDebugText = reason
@@ -648,13 +624,29 @@ Function RequestOnlineState(reason:String)
 	End If
 End Function
 
-Function SendOnlineRoomMessage:Int(messageType:UInt)
+Function RetryOnlineStateRequest()
+	If onlineHost Or Not onlineResyncPending Or Not onlineSession Or Not onlineJoined Then Return
+	Local now:UInt = UInt(MilliSecs())
+	If now - onlineResyncSentAt < ONLINE_RECOVERY_RETRY_MILLIS Then Return
+	If onlineResyncRetries >= ONLINE_MAX_RECOVERY_RETRIES Then
+		ReturnToMultiplayerAfterFailure("The match could not be recovered")
+		Return
+	End If
+	onlineResyncRetries :+ 1
+	onlineResyncSentAt = now
+	If SendOnlineControlMessage(CASCADE_MSG_STATE_REQUEST) Then
+		statusText = "Recovering match state; retry " + onlineResyncRetries
+	Else
+		statusText = "Waiting to retry match recovery"
+	End If
+End Function
+
+Function SendOnlineControlMessage:Int(messageType:UInt)
 	If Not onlineSession Or Not onlineJoined Then Return False
 	Return onlineSession.Send(onlinePeer, messageType, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered) = ETransportResult.Ok
 End Function
 
-Function EnterOnlineRoom(notifyPeer:Int = True)
-	If notifyPeer Then SendOnlineRoomMessage(CASCADE_MSG_RETURN_TO_ROOM)
+Function ShowOnlineRoom(message:String)
 	game = Null
 	viewGrid = Null
 	animationActive = False
@@ -662,39 +654,91 @@ Function EnterOnlineRoom(notifyPeer:Int = True)
 	hasPendingMoveRequest = False
 	hasPendingAppliedMove = False
 	onlineResyncPending = False
-	onlineLocalReady = False
-	onlineLocalInRoom = True
-	If onlineRemoteInRoom Then
-		statusText = "Both players are in the online lobby"
-	Else
-		statusText = "Waiting for the other player to return"
-	End If
+	onlineResyncRetries = 0
+	statusText = message
 	onlineDebugText = "Choose READY when both players are in the lobby"
 End Function
 
+Function EnterOnlineRoom()
+	If Not onlineRoom Then Return
+	If onlineRoom.ReturnToRoom() <> ETransportResult.Ok Then
+		statusText = "Could not return to the online lobby"
+	Else
+		statusText = "Returning to the online lobby..."
+		ProcessOnlineRoomEvents()
+	End If
+End Function
+
+Function ApplyOnlineRoomConfiguration:Int()
+	If Not onlineRoom Then Return False
+	Local config:SCascadeMatchConfig
+	If Not DecodeCascadeConfig(onlineRoom.Configuration(), config) Or config.playerCount <> 2 Then
+		statusText = "The host sent invalid room settings"
+		Return False
+	End If
+	lobbyConfig = config
+	onlineLobbyConfigReady = True
+	ResetPlayerColours()
+	Return True
+End Function
+
+Function ProcessOnlineRoomEvents()
+	If Not onlineRoom Then Return
+	Local roomEvent:SMatchRoomEvent
+	While onlineRoom.Poll(roomEvent)
+		Select roomEvent.Kind()
+			Case EMatchRoomEventKind.ConfigurationChanged
+				If ApplyOnlineRoomConfiguration() And Not onlineHost Then statusText = "The host selected " + LobbyDescription()
+			Case EMatchRoomEventKind.MatchStarted
+				If ApplyOnlineRoomConfiguration() Then
+					lobbyConfig.startingPlayer = Int(onlineRoom.Seed() Mod ULong(lobbyConfig.playerCount))
+					onlineResyncPending = False
+					onlineResyncRetries = 0
+					StartConfiguredMatch()
+					statusText = "Round " + onlineRoom.Round() + " started"
+				End If
+			Case EMatchRoomEventKind.MemberReturned
+				If roomEvent.Player() = OnlineLocalPlayer() Then
+					If onlineRoom.IsInRoom(1 - OnlineLocalPlayer()) Then
+						ShowOnlineRoom("Both players are in the online lobby")
+					Else
+						ShowOnlineRoom("Waiting for the other player to return")
+					End If
+				Else If game And game.winner >= 0 Then
+					statusText = "The other player returned to the lobby"
+				End If
+			Case EMatchRoomEventKind.StagingOpened
+				If onlineRoom.IsInRoom(OnlineLocalPlayer()) Then ShowOnlineRoom("Both players are in the online lobby")
+			Case EMatchRoomEventKind.AuthorityLeft
+				ReturnToMultiplayerAfterFailure("The room host left the match")
+				Return
+		End Select
+	Wend
+	TryStartOnlineRound()
+End Function
+
 Function SetOnlineReady()
-	If Not onlineJoined Or Not onlineLobbyConfigReady Or Not onlineLocalInRoom Or Not onlineRemoteInRoom Or onlineLocalReady Then Return
-	onlineLocalReady = True
-	If Not SendOnlineRoomMessage(CASCADE_MSG_ROOM_READY) Then
-		onlineLocalReady = False
+	If Not onlineJoined Or Not onlineRoom Or Not onlineLobbyConfigReady Then Return
+	Local localPlayer:Int = OnlineLocalPlayer()
+	If Not onlineRoom.IsInRoom(0) Or Not onlineRoom.IsInRoom(1) Or onlineRoom.IsReady(localPlayer) Then Return
+	If onlineRoom.SetLocalReady(True) <> ETransportResult.Ok Then
 		statusText = "Could not send ready state"
 		Return
 	End If
 	statusText = "Ready; waiting for the other player"
+	ProcessOnlineRoomEvents()
 	TryStartOnlineRound()
 End Function
 
 Function CycleOnlineMatch()
-	If Not onlineHost Or Not onlineJoined Or Not onlineLobbyConfigReady Then Return
+	If Not onlineHost Or Not onlineJoined Or Not onlineRoom Or Not onlineLobbyConfigReady Then Return
 	Local startingPlayer:Int = lobbyConfig.startingPlayer
 	If lobbyConfig.layout = ECascadeBoardLayout.Square Then
 		lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Hexagon, 3, 2, startingPlayer)
 	Else
 		lobbyConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, startingPlayer)
 	End If
-	onlineLocalReady = False
-	onlineRemoteReady = False
-	If SendOnlineLobbyConfig() Then
+	If PublishOnlineLobbyConfig() Then
 		statusText = "Match changed; both players must ready up"
 	Else
 		statusText = "Could not send the room settings"
@@ -702,16 +746,10 @@ Function CycleOnlineMatch()
 End Function
 
 Function TryStartOnlineRound()
-	If Not onlineHost Or Not onlineJoined Or Not onlineLocalInRoom Or Not onlineRemoteInRoom Or Not onlineLocalReady Or Not onlineRemoteReady Then Return
-	lobbyConfig.startingPlayer = (lobbyConfig.startingPlayer + 1) Mod 2
-	onlineLocalReady = False
-	onlineRemoteReady = False
-	onlineLocalInRoom = False
-	onlineRemoteInRoom = False
-	onlineResyncPending = False
-	StartConfiguredMatch()
-	SendOnlineConfig()
-	statusText = "New round started"
+	If Not onlineHost Or Not onlineJoined Or Not onlineRoom Or Not onlineRoom.AllPresentReady(2) Then Return
+	Local startingPlayer:Int = lobbyConfig.startingPlayer
+	If onlineRoom.Round() > 0 Then startingPlayer = (Int(onlineRoom.Seed()) + 1) Mod 2
+	If onlineRoom.BeginMatch(ULong(startingPlayer), 2) = ETransportResult.Ok Then ProcessOnlineRoomEvents()
 End Function
 
 Function ProcessPendingOnlineMove()
@@ -818,7 +856,12 @@ End Function
 Function RetryOnlineMove()
 	If onlineHost Or Not onlineWaitingForMove Or Not onlineSession Or Not onlineJoined Then Return
 	Local now:UInt = UInt(MilliSecs())
-	If now - onlineMoveSentAt < 750 Then Return
+	If now - onlineMoveSentAt < ONLINE_RETRY_MILLIS Then Return
+	If onlineMoveRetries >= ONLINE_MAX_MOVE_RETRIES Then
+		onlineWaitingForMove = False
+		RequestOnlineState("Host did not acknowledge turn " + onlineMoveRequest.turn)
+		Return
+	End If
 	If SendOnlineMoveRequest() Then
 		onlineMoveRetries :+ 1
 		statusText = "Waiting for host; retry " + onlineMoveRetries
@@ -832,6 +875,7 @@ Function CloseOnlineMatch()
 	If onlineRequest And online Then online.CancelMatchmaking(onlineRequest)
 	If onlineSession Then onlineSession.Close()
 	onlineSession = Null
+	onlineRoom = Null
 	onlineTransport = Null
 	onlinePeer = New SNetPeer
 	onlineRequest = 0
@@ -842,12 +886,9 @@ Function CloseOnlineMatch()
 	hasPendingAppliedMove = False
 	hasLastAppliedMove = False
 	onlineMoveRetries = 0
-	onlineLocalReady = False
-	onlineRemoteReady = False
-	onlineLocalInRoom = False
-	onlineRemoteInRoom = False
 	onlineLobbyConfigReady = False
 	onlineResyncPending = False
+	onlineResyncRetries = 0
 	onlineDebugText = ""
 End Function
 
@@ -938,8 +979,7 @@ Function UpdateGame()
 			statusText = "Waiting for the other player..."
 			Return
 		End If
-		Local localPlayer:Int = 1
-		If onlineHost Then localPlayer = 0
+		Local localPlayer:Int = OnlineLocalPlayer()
 		If player <> localPlayer Then
 			statusText = "Waiting for Player " + (game.currentPlayer + 1)
 			Return
@@ -1023,6 +1063,12 @@ Function FinishCascadeAnimation()
 	SyncPresentation()
 	If animationResult = ECascadeMoveResult.Won Then
 		statusText = "Player " + (game.winner + 1) + " wins!"
+		?macos Or ios
+		If onlineMode And onlineHost And onlineRoom And onlineRoom.Phase() = EMatchRoomPhase.Playing Then
+			onlineRoom.FinishMatch()
+			ProcessOnlineRoomEvents()
+		End If
+		?
 	Else
 		statusText = "Player " + (game.currentPlayer + 1) + " to move"
 		If game.lastTopples Then statusText = game.lastTopples + " topple" + Plural(game.lastTopples) + " resolved"
@@ -1176,7 +1222,7 @@ Function DrawOnlinePanel()
 	End If
 	SetColor 224, 233, 247
 	DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 478
-	If onlineLocalInRoom And onlineRemoteInRoom Then
+	If onlineRoom And onlineRoom.IsInRoom(0) And onlineRoom.IsInRoom(1) Then
 		DrawLobbyButton 300, 515, "READY", 40, 115, 205
 	Else
 		DrawLobbyButton 300, 515, "WAITING", 58, 68, 91
@@ -1185,15 +1231,9 @@ Function DrawOnlinePanel()
 End Function
 
 Function OnlineRoomPlayerState:String(player:Int)
-	Local isLocal:Int = player = OnlineLocalPlayer()
-	Local inRoom:Int = onlineRemoteInRoom
-	Local ready:Int = onlineRemoteReady
-	If isLocal Then
-		inRoom = onlineLocalInRoom
-		ready = onlineLocalReady
-	End If
-	If ready Then Return "READY"
-	If inRoom Then Return "IN LOBBY"
+	If Not onlineRoom Or Not onlineRoom.IsPresent(player) Then Return "WAITING"
+	If onlineRoom.IsReady(player) Then Return "READY"
+	If onlineRoom.IsInRoom(player) Then Return "IN LOBBY"
 	Return "RESULTS"
 End Function
 ?
@@ -1397,8 +1437,8 @@ End Function
 
 ?macos Or ios
 Function OnlineLocalPlayer:Int()
-	If onlineHost Then Return 0
-	Return 1
+	If onlineRoom And onlineRoom.LocalPlayer() >= 0 Then Return onlineRoom.LocalPlayer()
+	If onlineHost Then Return 0 Else Return 1
 End Function
 
 Function DrawOnlineIdentity()

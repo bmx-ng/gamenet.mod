@@ -30,6 +30,9 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.Session` adds a versioned handshake, framed application messages,
   optional handshake/idle timeouts, keepalive probes, and per-peer health
   statistics above any GameNet transport.
+- `GameNet.MatchRoom` coordinates a provider-neutral staging room with dynamic
+  membership, stable player slots, opaque game configuration, ready state,
+  shared round seeds, results, rematches, and participant-loss recovery.
 - `GameNet.Match` adds an authoritative, backend-neutral match lifecycle with
   fixed rosters, ready and pause requests, shared seeds, countdowns, agreed
   start frames, completion, rematches, and bounded transition events.
@@ -115,7 +118,9 @@ priority scheduling, entity destruction, and respawn.
 turn-based game for two to four players. Its data-driven route tables support
 rectangular and hexagonal Max2D grids, reflected boundaries, configurable board
 sizes, canonical cascades, elimination, state hashes, cycle protection, and a
-local rules playground for all supported player counts.
+local rules playground for all supported player counts. Its Game Center mode
+uses `GameNet.MatchRoom` for match selection, ready-up, shared starting state,
+independent result viewing, and rematches.
 
 [`examples/steam_sockets_ip`](examples/steam_sockets_ip) verifies a Steam
 Networking Sockets connection and packet exchange over local IP. The companion

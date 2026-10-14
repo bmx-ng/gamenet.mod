@@ -85,6 +85,7 @@ Global onlineRemoteReady:Int
 Global onlineLocalInRoom:Int
 Global onlineRemoteInRoom:Int
 Global onlineLobbyConfigReady:Int
+Global onlineResyncPending:Int
 Global pendingMoveRequest:SCascadeMoveRequest
 Global hasPendingMoveRequest:Int
 Global pendingAppliedMove:SCascadeAppliedMove
@@ -92,7 +93,7 @@ Global hasPendingAppliedMove:Int
 Global lastAppliedMove:SCascadeAppliedMove
 Global hasLastAppliedMove:Int
 Global onlineDebugText:String
-Global onlinePacket:Byte[64]
+Global onlinePacket:Byte[1024]
 ?
 
 For Local argument:String = EachIn AppArgs[1..]
@@ -440,6 +441,7 @@ Function BeginOnlineSession(requestId:UInt)
 		onlineLocalInRoom = False
 		onlineRemoteInRoom = False
 		onlineLobbyConfigReady = False
+		onlineResyncPending = False
 		onlineDebugText = ""
 	If onlineHost Then
 		onlineSession = TNetSession.CreateHost(onlineTransport, CASCADE_APP_ID, CASCADE_APP_VERSION, 1, 900)
@@ -507,14 +509,25 @@ Function PollOnlineSession()
 			Case ESessionEventKind.Message
 				ReceiveOnlineMessage(sessionEvent)
 			Case ESessionEventKind.Left
-				onlineJoined = False
-				statusText = "The other player left the match"
+				ReturnToMultiplayerAfterFailure("The other player left the match")
+				Return
 			Case ESessionEventKind.Rejected
-				statusText = "The Counter Cascade session was rejected"
+				ReturnToMultiplayerAfterFailure("The Counter Cascade session was rejected")
+				Return
 			Case ESessionEventKind.Error
-				statusText = "Counter Cascade session error " + sessionEvent.Code()
+				ReturnToMultiplayerAfterFailure("Counter Cascade session error " + sessionEvent.Code())
+				Return
 		End Select
 	Wend
+End Function
+
+Function ReturnToMultiplayerAfterFailure(message:String)
+	CloseOnlineMatch()
+	game = Null
+	viewGrid = Null
+	lobbyOpen = False
+	menuPage = ECascadeMenuPage.Multiplayer
+	statusText = message
 End Function
 
 Function SendOnlineConfig()
@@ -548,6 +561,7 @@ Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 			onlineLocalInRoom = False
 			onlineRemoteInRoom = False
 			StartConfiguredMatch()
+			onlineResyncPending = False
 			statusText = "Connected - you are Player 2"
 		Case CASCADE_MSG_MOVE_REQUEST
 			If Not onlineHost Or hasPendingMoveRequest Then Return
@@ -593,7 +607,45 @@ Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 			onlineLocalReady = False
 			onlineRemoteReady = False
 			statusText = "The host selected " + LobbyDescription()
+		Case CASCADE_MSG_STATE_REQUEST
+			If onlineHost And sessionEvent.Payload().Length() = 0 Then SendOnlineState()
+		Case CASCADE_MSG_STATE
+			If onlineHost Or Not game Then Return
+			If DecodeCascadeState(sessionEvent.Payload(), game) Then
+				onlineResyncPending = False
+				onlineWaitingForMove = False
+				hasPendingAppliedMove = False
+				animationActive = False
+				animationStarted = False
+				eventLog.Clear()
+				SyncPresentation()
+				balanceInitialized = False
+				statusText = "Match resynchronised with the host"
+				onlineDebugText = "Recovered authoritative turn " + game.turn
+			Else
+				statusText = "The host sent an invalid recovery state"
+			End If
 	End Select
+End Function
+
+Function SendOnlineState:Int()
+	If Not onlineHost Or Not onlineSession Or Not onlineJoined Or Not game Then Return False
+	Local length:Size_T = EncodeCascadeState(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length), game)
+	If length = 0 Then Return False
+	Return onlineSession.Send(onlinePeer, CASCADE_MSG_STATE, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) = ETransportResult.Ok
+End Function
+
+Function RequestOnlineState(reason:String)
+	If onlineHost Or Not onlineSession Or Not onlineJoined Or Not game Then Return
+	If onlineResyncPending Then Return
+	If SendOnlineRoomMessage(CASCADE_MSG_STATE_REQUEST) Then
+		onlineResyncPending = True
+		onlineWaitingForMove = False
+		statusText = "Recovering match state from the host..."
+		onlineDebugText = reason
+	Else
+		statusText = "Could not request match recovery"
+	End If
 End Function
 
 Function SendOnlineRoomMessage:Int(messageType:UInt)
@@ -609,6 +661,7 @@ Function EnterOnlineRoom(notifyPeer:Int = True)
 	onlineWaitingForMove = False
 	hasPendingMoveRequest = False
 	hasPendingAppliedMove = False
+	onlineResyncPending = False
 	onlineLocalReady = False
 	onlineLocalInRoom = True
 	If onlineRemoteInRoom Then
@@ -655,6 +708,7 @@ Function TryStartOnlineRound()
 	onlineRemoteReady = False
 	onlineLocalInRoom = False
 	onlineRemoteInRoom = False
+	onlineResyncPending = False
 	StartConfiguredMatch()
 	SendOnlineConfig()
 	statusText = "New round started"
@@ -681,14 +735,13 @@ Function ProcessPendingOnlineMove()
 			Return
 		End If
 		If move.turn <> game.turn Or move.player <> game.currentPlayer Then
-			statusText = "Match state no longer agrees with the host"
-			onlineDebugText = "Local turn " + game.turn + ", host sent " + move.turn
+			RequestOnlineState("Local turn " + game.turn + ", host sent " + move.turn)
 			Return
 		End If
 		onlineWaitingForMove = False
 		If move.result <> ECascadeMoveResult.Accepted And move.result <> ECascadeMoveResult.Won Then
 			If game.StateHash() <> move.stateHash Then
-				statusText = "Match state check failed"
+				RequestOnlineState("Rejected move state hash differed")
 				Return
 			End If
 			Select move.result
@@ -704,7 +757,7 @@ Function ProcessPendingOnlineMove()
 		End If
 		Local result:ECascadeMoveResult = game.ApplyMove(move.player, move.cell, eventLog)
 		If result <> move.result Or game.StateHash() <> move.stateHash Then
-			statusText = "Match state check failed"
+			RequestOnlineState("Applied move state hash differed")
 			Return
 		End If
 		onlineDebugText = "Host confirmed turn " + move.turn
@@ -742,7 +795,7 @@ Function SendOnlineAppliedMove:Int(move:SCascadeAppliedMove)
 End Function
 
 Function SendOnlineMove(cell:Int)
-	If Not onlineSession Or Not onlineJoined Or onlineWaitingForMove Then Return
+	If Not onlineSession Or Not onlineJoined Or onlineWaitingForMove Or onlineResyncPending Then Return
 	onlineMoveRequest = New SCascadeMoveRequest(game.turn, cell)
 	onlineMoveRetries = 0
 	If SendOnlineMoveRequest() Then
@@ -794,6 +847,7 @@ Function CloseOnlineMatch()
 	onlineLocalInRoom = False
 	onlineRemoteInRoom = False
 	onlineLobbyConfigReady = False
+	onlineResyncPending = False
 	onlineDebugText = ""
 End Function
 
@@ -1041,6 +1095,10 @@ Function DrawMultiplayerMenu()
 	Local unavailable:String = "No multiplayer provider is available in this build"
 	DrawText unavailable, (SCREEN_WIDTH - TextWidth(unavailable)) * 0.5, 315
 	?
+	If statusText <> "Choose a multiplayer mode" Then
+		SetColor 210, 176, 112
+		DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 425
+	End If
 	DrawLobbyButton 410, 500, "BACK", 58, 68, 91
 	SetColor 126, 143, 170
 	Local hint:String = "Rooms and local-network play are coming next"

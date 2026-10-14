@@ -69,6 +69,20 @@ Local rejectedMove:SCascadeAppliedMove = New SCascadeAppliedMove(7, 1, 3, ECasca
 CheckProtocol(EncodeCascadeAppliedMove(Byte Ptr(packet), Size_T(packet.Length), rejectedMove) = CASCADE_MOVE_APPLIED_PACKET_SIZE, "encode rejected move response")
 CheckProtocol(DecodeCascadeAppliedMove(New SPacketView(Byte Ptr(packet), CASCADE_MOVE_APPLIED_PACKET_SIZE), rejectedMove) And rejectedMove.result = ECascadeMoveResult.Invalid, "decode rejected move response")
 
+Local statePacket:Byte[1024]
+Local stateLength:Size_T = EncodeCascadeState(Byte Ptr(statePacket), Size_T(statePacket.Length), host)
+CheckProtocol(stateLength = CascadeStatePacketSize(host.board.CellCount()), "encode full match state")
+Local recoveryGame:TCascadeGame = TCascadeGame.Create(config.CreateBoard())
+Local recoveryHash:ULong = recoveryGame.StateHash()
+CheckProtocol(Not DecodeCascadeState(New SPacketView(Byte Ptr(statePacket), stateLength - 1), recoveryGame), "reject truncated full state")
+CheckProtocol(recoveryGame.StateHash() = recoveryHash, "truncated state does not mutate game")
+statePacket[CASCADE_STATE_HEADER_SIZE] = 99
+CheckProtocol(Not DecodeCascadeState(New SPacketView(Byte Ptr(statePacket), stateLength), recoveryGame), "reject invalid full-state owner")
+CheckProtocol(recoveryGame.StateHash() = recoveryHash, "invalid state does not mutate game")
+stateLength = EncodeCascadeState(Byte Ptr(statePacket), Size_T(statePacket.Length), host)
+CheckProtocol(DecodeCascadeState(New SPacketView(Byte Ptr(statePacket), stateLength), recoveryGame), "decode full match state")
+CheckProtocol(recoveryGame.StateHash() = host.StateHash() And recoveryGame.lastTopples = host.lastTopples, "full state restores authoritative game")
+
 ' Exercise the same reliable session path used by GameKit and other transports.
 Local pair:TLoopbackPair = TLoopbackPair.Create(32, 900)
 Local hostSession:TNetSession = TNetSession.CreateHost(pair.First(), CASCADE_APP_ID, CASCADE_APP_VERSION, 1, 900)
@@ -107,6 +121,14 @@ CheckProtocol(hostSession.Send(hostPeer, CASCADE_MSG_MOVE_APPLIED, CASCADE_GAME_
 CheckProtocol(clientSession.PollAt(sessionEvent, 4) And sessionEvent.Kind() = ESessionEventKind.Message And sessionEvent.MessageType() = CASCADE_MSG_MOVE_APPLIED, "client receives authoritative move")
 CheckProtocol(DecodeCascadeAppliedMove(sessionEvent.Payload(), networkMove), "client decodes authoritative move")
 CheckProtocol(networkClient.ApplyMove(networkMove.player, networkMove.cell) = networkMove.result And networkClient.StateHash() = networkMove.stateHash, "session move keeps both games identical")
+
+CheckProtocol(clientSession.Send(clientPeer, CASCADE_MSG_STATE_REQUEST, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered) = ETransportResult.Ok, "client requests full state")
+CheckProtocol(hostSession.PollAt(sessionEvent, 5) And sessionEvent.Kind() = ESessionEventKind.Message And sessionEvent.MessageType() = CASCADE_MSG_STATE_REQUEST And sessionEvent.Payload().Length() = 0, "host receives full-state request")
+stateLength = EncodeCascadeState(Byte Ptr(statePacket), Size_T(statePacket.Length), networkHost)
+CheckProtocol(hostSession.Send(hostPeer, CASCADE_MSG_STATE, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(statePacket), stateLength) = ETransportResult.Ok, "host sends full state")
+CheckProtocol(clientSession.PollAt(sessionEvent, 6) And sessionEvent.Kind() = ESessionEventKind.Message And sessionEvent.MessageType() = CASCADE_MSG_STATE, "client receives full state")
+networkClient.counters[0] :+ 1
+CheckProtocol(DecodeCascadeState(sessionEvent.Payload(), networkClient) And networkClient.StateHash() = networkHost.StateHash(), "full state repairs deliberate divergence")
 
 hostSession.Close()
 clientSession.Close()

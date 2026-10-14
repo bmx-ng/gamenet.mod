@@ -51,4 +51,6 @@ the authority and carries the same deterministic protocol that another
 backend could use later.
 
 `test_protocol.bmx` verifies strict packet decoding and proves that host and
-client games remain identical while replaying transmitted moves.
+client games remain identical while replaying transmitted moves. If a client
+nevertheless detects a turn or state-hash disagreement, it requests a bounded
+full-state snapshot and validates it completely before replacing local state.

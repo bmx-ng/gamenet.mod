@@ -299,18 +299,7 @@ Type TCascadeGame
 	End Method
 
 	Method StateHash:ULong()
-		Local hash:ULong = board.TopologyHash()
-		hash = CascadeHashUInt(hash, turn)
-		hash = CascadeHashUInt(hash, UInt(currentPlayer))
-		hash = CascadeHashUInt(hash, UInt(winner))
-		For Local player:Int = 0 Until board.playerCount
-			hash = CascadeHashUInt(hash, UInt(alive[player]))
-		Next
-		For Local cell:Int = 0 Until board.CellCount()
-			hash = CascadeHashUInt(hash, UInt(owners[cell]))
-			hash = CascadeHashUInt(hash, UInt(counters[cell]))
-		Next
-		Return hash
+		Return CascadeStateHash(board, turn, currentPlayer, winner, alive, owners, counters)
 	End Method
 
 	Private
@@ -401,6 +390,22 @@ Type TCascadeGame
 		Return False
 	End Method
 End Type
+
+Function CascadeStateHash:ULong(board:TCascadeBoard, turn:UInt, currentPlayer:Int, winner:Int, alive:Byte[], owners:Byte[], counters:Int[])
+	If Not board Or alive.Length <> board.playerCount Or owners.Length <> board.CellCount() Or counters.Length <> board.CellCount() Then Return 0
+	Local hash:ULong = board.TopologyHash()
+	hash = CascadeHashUInt(hash, turn)
+	hash = CascadeHashUInt(hash, UInt(currentPlayer))
+	hash = CascadeHashUInt(hash, UInt(winner))
+	For Local player:Int = 0 Until board.playerCount
+		hash = CascadeHashUInt(hash, UInt(alive[player]))
+	Next
+	For Local cell:Int = 0 Until board.CellCount()
+		hash = CascadeHashUInt(hash, UInt(owners[cell]))
+		hash = CascadeHashUInt(hash, UInt(counters[cell]))
+	Next
+	Return hash
+End Function
 
 Function CascadeHashByte:ULong(hash:ULong, value:UInt)
 	Return (hash ~ ULong(value & $ff:UInt)) * $100000001b3:ULong

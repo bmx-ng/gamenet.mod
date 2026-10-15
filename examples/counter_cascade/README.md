@@ -45,13 +45,21 @@ Game Center to find between two and four players. Once the initial group has
 formed, the elected host can either wait for more players or start with those
 currently present.
 The completed matchmaking group enters a persistent game lobby where the host
-selects a board suitable for its player count and everyone readies up before play. After
-a match, each player returns to the room independently; the room shows when
+selects a board suitable for its player count. Each player can choose a unique
+counter colour before everyone readies up. After a match, each player returns
+to the room independently; the room shows when
 another player is still on the results screen and does not permit another
 ready-up until everyone returns.
 GameKit supplies matchmaking and transport, while a GameNet session elects
 the authority and carries the same deterministic protocol that another
 backend could use later.
+
+On touch devices an active game provides a visible `LEAVE MATCH` control with
+a confirmation step. Leaving closes the fixed GameKit match for the remaining
+player when fewer than two participants remain. Brief application suspension
+resumes and resynchronises the authoritative state; if GameKit has already
+disconnected the peer, the depleted match closes cleanly instead of continuing
+with divergent state.
 
 `test_protocol.bmx` verifies strict packet decoding and proves that host and
 client games remain identical while replaying transmitted moves. If a client

@@ -15,11 +15,14 @@ End Function
 
 Local packet:Byte[64]
 Local config:SCascadeMatchConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, 1)
+config.SetPlayerColour(0, 4)
+config.SetPlayerColour(1, 5)
 CheckProtocol(config.IsValid(), "valid square configuration")
 CheckProtocol(EncodeCascadeConfig(Byte Ptr(packet), Size_T(packet.Length), config) = CASCADE_CONFIG_PACKET_SIZE, "encode configuration")
 Local decodedConfig:SCascadeMatchConfig
 CheckProtocol(DecodeCascadeConfig(New SPacketView(Byte Ptr(packet), CASCADE_CONFIG_PACKET_SIZE), decodedConfig), "decode configuration")
 CheckProtocol(decodedConfig.layout = config.layout And decodedConfig.size = config.size And decodedConfig.playerCount = config.playerCount And decodedConfig.startingPlayer = config.startingPlayer, "configuration values")
+CheckProtocol(decodedConfig.PlayerColour(0) = 4 And decodedConfig.PlayerColour(1) = 5, "configuration colours")
 CheckProtocol(decodedConfig.CreateBoard() <> Null, "configuration creates board")
 
 Local invalidConfig:SCascadeMatchConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Hexagon, 3, 4)
@@ -27,8 +30,15 @@ CheckProtocol(Not invalidConfig.IsValid(), "reject invalid regular hex roster")
 CheckProtocol(EncodeCascadeConfig(Byte Ptr(packet), Size_T(packet.Length), invalidConfig) = 0, "do not encode invalid configuration")
 Local invalidStarter:SCascadeMatchConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2, 2)
 CheckProtocol(Not invalidStarter.IsValid(), "reject invalid starting player")
+Local duplicateColours:SCascadeMatchConfig = New SCascadeMatchConfig(ECascadeBoardLayout.Square, 5, 2)
+duplicateColours.SetPlayerColour(1, duplicateColours.PlayerColour(0))
+CheckProtocol(Not duplicateColours.IsValid(), "reject duplicate player colours")
 packet[0] = 99
 CheckProtocol(Not DecodeCascadeConfig(New SPacketView(Byte Ptr(packet), CASCADE_CONFIG_PACKET_SIZE), decodedConfig), "reject configuration version")
+
+CheckProtocol(EncodeCascadeColourRequest(Byte Ptr(packet), Size_T(packet.Length)) = CASCADE_COLOUR_REQUEST_PACKET_SIZE, "encode colour request")
+CheckProtocol(DecodeCascadeColourRequest(New SPacketView(Byte Ptr(packet), CASCADE_COLOUR_REQUEST_PACKET_SIZE)), "decode colour request")
+CheckProtocol(Not DecodeCascadeColourRequest(New SPacketView(Byte Ptr(packet), 0)), "reject truncated colour request")
 
 Local request:SCascadeMoveRequest = New SCascadeMoveRequest(42, 17)
 CheckProtocol(EncodeCascadeMoveRequest(Byte Ptr(packet), Size_T(packet.Length), request) = CASCADE_MOVE_REQUEST_PACKET_SIZE, "encode move request")

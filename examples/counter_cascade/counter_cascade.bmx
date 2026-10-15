@@ -9,6 +9,7 @@ Import BRL.PNGLoader
 
 ?macos Or ios
 Import GameNet.GameKitOnline
+Import GameNet.Lifecycle
 Import GameNet.MatchRoom
 Import GameNet.Online
 Import GameNet.Session
@@ -67,6 +68,7 @@ Global animationStarted:Int
 Global animationStartMillis:Int
 Global animationResult:ECascadeMoveResult
 Global cascadeStepMillis:Int = DEFAULT_CASCADE_STEP_MILLIS
+Global leaveConfirmation:Int
 Global touchHitPending:Int
 Global touchHitX:Float
 Global touchHitY:Float
@@ -101,6 +103,9 @@ Global lastAppliedMove:SCascadeAppliedMove
 Global hasLastAppliedMove:Int
 Global onlineDebugText:String
 Global onlinePacket:Byte[1024]
+Global onlineLifecycle:TAppLifecycle = TAppLifecycle.Create()
+Global onlineResumeAction:EAppResumeAction
+Global onlineResumePending:Int
 ?
 
 For Local argument:String = EachIn AppArgs[1..]
@@ -197,6 +202,7 @@ Function StartConfiguredMatch()
 		statusText = "Place a counter on an empty hexagon or one of your own"
 	End If
 	lobbyOpen = False
+	leaveConfirmation = False
 	PrepareBoardView()
 	balanceInitialized = False
 End Function
@@ -243,7 +249,11 @@ Function UpdateMenu()
 		Local roomX:Float, roomY:Float
 		If PollPress(roomX, roomY) Then
 			If onlineJoined Then
-				If onlineHost And roomY >= 380 And roomY < 432 And ((roomX >= 210 And roomX < 310) Or (roomX >= 690 And roomX < 790)) Then
+				Local localPlayer:Int = OnlineLocalPlayer()
+				Local colourX:Float = OnlineRoomSlotX(localPlayer, onlineRoom.MaxPlayers())
+				If onlineLobbyConfigReady And onlineRoom.IsPresent(localPlayer) And roomY >= 220 And roomY < 288 And Abs(roomX - colourX) < 42 Then
+					RequestOnlineColourChange()
+				Else If onlineHost And roomY >= 380 And roomY < 432 And ((roomX >= 210 And roomX < 310) Or (roomX >= 690 And roomX < 790)) Then
 					CycleOnlineMatch()
 				Else If roomY >= 515 And roomY < 575 And roomX >= 300 And roomX < 480 Then
 					SetOnlineReady()
@@ -391,7 +401,33 @@ Function PollPress:Int(x:Float Var, y:Float Var)
 	?
 End Function
 
-?ios Or android
+?ios
+Function CascadeTouchEventHook:Object(id:Int, data:Object, context:Object)
+	Local event:TEvent = TEvent(data)
+	If Not event Then Return data
+	Select event.id
+		Case EVENT_APPSUSPEND
+			touchHitPending = False
+			If onlineMode And onlineSession And onlineLifecycle.Suspend() Then onlineSession.Suspend()
+			Return data
+		Case EVENT_APPRESUME
+			If onlineLifecycle.IsSuspended() Then
+				If onlineSession Then onlineSession.Resume()
+				Local connected:Int = onlineSession And onlineSession.IsOpen()
+				onlineResumeAction = onlineLifecycle.Resume(connected)
+				onlineResumePending = onlineMode And onlineSession <> Null
+			End If
+			Return data
+	End Select
+	If event.id <> EVENT_TOUCHDOWN Then Return data
+	Local nativeX:Float = NativeResolutionWidth() * event.x / 10000.0
+	Local nativeY:Float = NativeResolutionHeight() * event.y / 10000.0
+	NativeToVirtual(nativeX, nativeY, touchHitX, touchHitY)
+	touchHitPending = True
+	Return data
+End Function
+
+?android
 Function CascadeTouchEventHook:Object(id:Int, data:Object, context:Object)
 	Local event:TEvent = TEvent(data)
 	If Not event Or event.id <> EVENT_TOUCHDOWN Then Return data
@@ -530,9 +566,40 @@ Function PollOnlineGame()
 		Wend
 	End If
 	If onlineSession Then PollOnlineSession()
+	ProcessOnlineResume()
 	ProcessPendingOnlineMove()
 	RetryOnlineMove()
 	RetryOnlineStateRequest()
+End Function
+
+Function ProcessOnlineResume()
+	If Not onlineResumePending Then Return
+	onlineResumePending = False
+	If Not onlineSession Or Not onlineJoined Then
+		ReturnToMultiplayerAfterFailure("The online match ended while the game was in the background")
+		Return
+	End If
+	Select onlineResumeAction
+		Case EAppResumeAction.Continue
+			statusText = "Online match resumed"
+		Case EAppResumeAction.Resynchronise
+			If onlineRoom Then onlineRoom.Synchronize()
+			If game Then
+				If onlineHost Then
+					For Local player:Int = 1 Until onlineRoom.MaxPlayers()
+						Local peer:SNetPeer = onlineRoom.SessionPeer(player)
+						If peer.IsValid() Then SendOnlineState(peer)
+					Next
+					statusText = "Online match resumed"
+				Else
+					RequestOnlineState("Returned to the game after an interruption")
+				End If
+			Else
+				statusText = "Online lobby restored"
+			End If
+		Case EAppResumeAction.Reconnect, EAppResumeAction.Leave
+			ReturnToMultiplayerAfterFailure("The online match expired while the game was in the background")
+	End Select
 End Function
 
 Function PollOnlineSession()
@@ -561,6 +628,10 @@ Function PollOnlineSession()
 				End If
 			Case ESessionEventKind.Left
 				If onlineHost And onlineRoom.PlayerLeft(sessionEvent.Peer(), sessionEvent.Code()) = ETransportResult.Ok Then
+					If onlineRoom.MemberCount() < 2 Then
+						ReturnToMultiplayerAfterFailure("The other player left; find players again to continue")
+						Return
+					End If
 					statusText = "A player left the lobby"
 				Else
 					ReturnToMultiplayerAfterFailure("The room host left the match")
@@ -589,6 +660,7 @@ End Function
 
 Function PublishOnlineLobbyConfig:Int()
 	If Not onlineHost Or Not onlineRoom Then Return False
+	CopyPaletteToConfig(lobbyConfig)
 	Local length:Size_T = EncodeCascadeConfig(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length), lobbyConfig)
 	If length = 0 Then Return False
 	Return onlineRoom.SetConfiguration(New SPacketView(Byte Ptr(onlinePacket), length)) = ETransportResult.Ok
@@ -612,6 +684,11 @@ End Function
 
 Function ReceiveOnlineMessage(sessionEvent:SSessionEvent)
 	Select sessionEvent.MessageType()
+		Case CASCADE_MSG_COLOUR_REQUEST
+			If onlineHost And DecodeCascadeColourRequest(sessionEvent.Payload()) Then
+				Local requestPlayer:Int = onlineRoom.PlayerForSessionPeer(sessionEvent.Peer())
+				If requestPlayer > 0 Then CycleOnlinePlayerColour(requestPlayer)
+			End If
 		Case CASCADE_MSG_MOVE_REQUEST
 			If Not onlineHost Or hasPendingMoveRequest Then Return
 			Local request:SCascadeMoveRequest
@@ -732,8 +809,66 @@ Function ApplyOnlineRoomConfiguration:Int()
 	End If
 	lobbyConfig = config
 	onlineLobbyConfigReady = True
-	ResetPlayerColours()
+	CopyConfigToPalette(lobbyConfig)
 	Return True
+End Function
+
+Function CopyPaletteToConfig(config:SCascadeMatchConfig Var)
+	For Local player:Int = 0 Until CASCADE_MAX_PLAYERS
+		config.SetPlayerColour(player, playerPalette[player])
+	Next
+End Function
+
+Function CopyConfigToPalette(config:SCascadeMatchConfig)
+	For Local player:Int = 0 Until CASCADE_MAX_PLAYERS
+		playerPalette[player] = config.PlayerColour(player)
+	Next
+End Function
+
+Function CycleOnlinePlayerColour(player:Int)
+	If Not onlineHost Or Not onlineRoom Or onlineRoom.Phase() <> EMatchRoomPhase.Staging Or Not onlineRoom.IsPresent(player) Then Return
+	CycleOnlinePaletteColour(player)
+	If PublishOnlineLobbyConfig() Then
+		statusText = "Player " + (player + 1) + " chose " + PaletteName(playerPalette[player])
+	Else
+		CopyConfigToPalette(lobbyConfig)
+		statusText = "Could not change the counter colour"
+	End If
+End Function
+
+Function CycleOnlinePaletteColour(player:Int)
+	Local previous:Int = playerPalette[player]
+	For Local attempt:Int = 1 To 6
+		Local candidate:Int = (previous + attempt) Mod 6
+		Local used:Int
+		For Local other:Int = 0 Until onlineRoom.MaxPlayers()
+			If other <> player And onlineRoom.IsPresent(other) And playerPalette[other] = candidate Then used = True
+		Next
+		If used Then Continue
+		For Local other:Int = 0 Until onlineRoom.MaxPlayers()
+			If other <> player And Not onlineRoom.IsPresent(other) And playerPalette[other] = candidate Then
+				playerPalette[other] = previous
+				Exit
+			End If
+		Next
+		playerPalette[player] = candidate
+		Return
+	Next
+End Function
+
+Function RequestOnlineColourChange()
+	If Not onlineRoom Or onlineRoom.Phase() <> EMatchRoomPhase.Staging Then Return
+	Local player:Int = OnlineLocalPlayer()
+	If onlineHost Then
+		CycleOnlinePlayerColour(player)
+		Return
+	End If
+	Local length:Size_T = EncodeCascadeColourRequest(Byte Ptr(onlinePacket), Size_T(onlinePacket.Length))
+	If length And onlineSession.Send(onlinePeer, CASCADE_MSG_COLOUR_REQUEST, CASCADE_CONTROL_CHANNEL, EDeliveryMode.ReliableOrdered, Byte Ptr(onlinePacket), length) = ETransportResult.Ok Then
+		statusText = "Changing your counter colour..."
+	Else
+		statusText = "Could not request a new counter colour"
+	End If
 End Function
 
 Function ProcessOnlineRoomEvents()
@@ -969,6 +1104,8 @@ Function CloseOnlineMatch()
 	onlineLobbyConfigReady = False
 	onlineResyncPending = False
 	onlineResyncRetries = 0
+	onlineResumePending = False
+	leaveConfirmation = False
 	onlineDebugText = ""
 End Function
 
@@ -980,6 +1117,18 @@ End Function
 ?
 
 Function UpdateGame()
+	If leaveConfirmation Then
+		Local confirmX:Float, confirmY:Float
+		If PollPress(confirmX, confirmY) And confirmY >= 390 And confirmY < 450 Then
+			If confirmX >= 300 And confirmX < 480 Then
+				leaveConfirmation = False
+			Else If confirmX >= 520 And confirmX < 700 Then
+				LeaveCurrentMatch()
+			End If
+		End If
+		If KeyHit(KEY_M) Then leaveConfirmation = False
+		Return
+	End If
 	If animationActive Then
 		Local ignoredX:Float, ignoredY:Float
 		PollPress(ignoredX, ignoredY)
@@ -987,15 +1136,7 @@ Function UpdateGame()
 		Return
 	End If
 	If KeyHit(KEY_M) Then
-		?macos Or ios
-		If onlineMode Then
-			EnterOnlineRoom()
-			Return
-		End If
-		?
-		game = Null
-		viewGrid = Null
-		OpenLocalMenu()
+		leaveConfirmation = True
 		Return
 	End If
 	If KeyHit(KEY_R) Then
@@ -1010,6 +1151,10 @@ Function UpdateGame()
 	hoverCell = -1
 	Local pressX:Float, pressY:Float
 	Local clicked:Int = PollPress(pressX, pressY)
+	If clicked And game.winner < 0 And pressX >= 810 And pressX < 970 And pressY >= 600 And pressY < 645 Then
+		leaveConfirmation = True
+		Return
+	End If
 	If game.winner >= 0 Then
 		If clicked And pressY >= 365 And pressY < 421 Then
 			?macos Or ios
@@ -1085,6 +1230,23 @@ Function UpdateGame()
 		Case ECascadeMoveResult.ToppleLimitReached
 			statusText = "Move rejected: cascade safety limit reached"
 	End Select
+End Function
+
+Function LeaveCurrentMatch()
+	leaveConfirmation = False
+	?macos Or ios
+	If onlineMode Then
+		CloseOnlineMatch()
+		game = Null
+		viewGrid = Null
+		OpenMultiplayerMenu()
+		statusText = "You left the online match"
+		Return
+	End If
+	?
+	game = Null
+	viewGrid = Null
+	OpenLocalMenu()
 End Function
 
 Function BeginCascadeAnimation(result:ECascadeMoveResult)
@@ -1269,8 +1431,7 @@ Function DrawOnlinePanel()
 	Local roomPlayers:Int = onlineDesiredPlayers
 	If onlineRoom Then roomPlayers = onlineRoom.MaxPlayers()
 	For Local player:Int = 0 Until roomPlayers
-		Local centreX:Float = 500
-		If roomPlayers > 1 Then centreX = 200 + Float(player) * 600.0 / Float(roomPlayers - 1)
+		Local centreX:Float = OnlineRoomSlotX(player, roomPlayers)
 		SetPlayerColor player
 		DrawOval centreX - 24, 230, 48, 48
 		SetColor 225, 234, 248
@@ -1286,6 +1447,7 @@ Function DrawOnlinePanel()
 		End If
 		DrawText roleLabel, centreX - TextWidth(roleLabel) * 0.5, 314
 		Local playerState:String = OnlineRoomPlayerState(player)
+		If onlineRoom And onlineRoom.IsPresent(player) Then playerState :+ " / " + PaletteName(playerPalette[player])
 		DrawText playerState, centreX - TextWidth(playerState) * 0.5, 340
 	Next
 
@@ -1308,14 +1470,22 @@ Function DrawOnlinePanel()
 		Local guestHint:String = "The host chooses the match"
 		DrawText guestHint, (SCREEN_WIDTH - TextWidth(guestHint)) * 0.5, 435
 	End If
+	SetColor 126, 143, 170
+	Local colourHint:String = "Tap your counter to change colour"
+	DrawText colourHint, (SCREEN_WIDTH - TextWidth(colourHint)) * 0.5, 455
 	SetColor 224, 233, 247
-	DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 470
+	DrawText statusText, (SCREEN_WIDTH - TextWidth(statusText)) * 0.5, 482
 	If onlineRoom And onlineRoom.AllPresentInRoom(2) Then
 		DrawLobbyButton 300, 515, "READY", 40, 115, 205
 	Else
 		DrawLobbyButton 300, 515, "WAITING", 58, 68, 91
 	End If
 	DrawLobbyButton 520, 515, "LEAVE", 89, 72, 142
+End Function
+
+Function OnlineRoomSlotX:Float(player:Int, players:Int)
+	If players <= 1 Then Return 500
+	Return 200 + Float(player) * 600.0 / Float(players - 1)
 End Function
 
 Function DrawGameKitMatchmakingLobby(providerLobby:IOnlineLobby)
@@ -1480,7 +1650,9 @@ Function DrawGame()
 	End If
 	SetColor 148, 165, 193
 	DrawText "Turn " + game.turn + "   Topples " + game.lastTopples, 780, 32
-	DrawText "M: modes   R: reset", 804, 57
+	?Not ios And Not android
+	DrawText "M: leave   R: reset", 804, 57
+	?
 
 	For Local cell:Int = 0 Until game.board.CellCount()
 		If pointerHover And Not animationActive And cell = hoverCell And game.IsLegalMove(game.currentPlayer, cell) Then
@@ -1495,6 +1667,9 @@ Function DrawGame()
 	Next
 	DrawCascadeMotion()
 	DrawBalanceChart()
+	?ios Or android
+	If game.winner < 0 Then DrawRoomButton 810, 600, 160, 45, "LEAVE MATCH", 89, 72, 142
+	?
 	SetLineWidth 1
 	SetColor 177, 190, 211
 	DrawText statusText, 38, 660
@@ -1505,6 +1680,35 @@ Function DrawGame()
 	End If
 	?
 	If game.winner >= 0 And Not animationActive Then DrawWinnerPanel()
+	If leaveConfirmation Then DrawLeaveConfirmation()
+End Function
+
+Function DrawLeaveConfirmation()
+	SetColor 3, 6, 12
+	SetAlpha 0.72
+	DrawRect 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT
+	SetAlpha 1.0
+	SetColor 10, 15, 27
+	DrawRect 250, 220, 500, 270
+	SetColor 239, 243, 251
+	Local title:String = "LEAVE THIS MATCH?"
+	DrawText title, (SCREEN_WIDTH - TextWidth(title)) * 0.5, 260
+	SetColor 173, 188, 212
+	?macos Or ios
+	If onlineMode Then
+		Local warning:String = "The match will end for the other players."
+		DrawText warning, (SCREEN_WIDTH - TextWidth(warning)) * 0.5, 320
+	Else
+		Local warning:String = "The current board will be abandoned."
+		DrawText warning, (SCREEN_WIDTH - TextWidth(warning)) * 0.5, 320
+	End If
+	?
+	?Not macos And Not ios
+	Local warning:String = "The current board will be abandoned."
+	DrawText warning, (SCREEN_WIDTH - TextWidth(warning)) * 0.5, 320
+	?
+	DrawRoomButton 300, 390, 180, 60, "CANCEL", 58, 68, 91
+	DrawRoomButton 520, 390, 180, 60, "LEAVE", 150, 58, 74
 End Function
 
 Function DrawBalanceChart()

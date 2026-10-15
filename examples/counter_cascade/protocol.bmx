@@ -1,5 +1,5 @@
 Const CASCADE_APP_ID:UInt = $43415343 ' CASC
-Const CASCADE_APP_VERSION:UInt = 1
+Const CASCADE_APP_VERSION:UInt = 2
 
 Const CASCADE_CONTROL_CHANNEL:UInt = 0
 Const CASCADE_GAME_CHANNEL:UInt = 1
@@ -12,8 +12,10 @@ Const CASCADE_MSG_MATCH_COMMAND:UInt = 4
 Const CASCADE_MSG_MATCH_STATE:UInt = 5
 Const CASCADE_MSG_STATE_REQUEST:UInt = 9
 Const CASCADE_MSG_STATE:UInt = 10
+Const CASCADE_MSG_COLOUR_REQUEST:UInt = 11
 
-Const CASCADE_CONFIG_PACKET_SIZE:Size_T = 5
+Const CASCADE_CONFIG_PACKET_SIZE:Size_T = 9
+Const CASCADE_COLOUR_REQUEST_PACKET_SIZE:Size_T = 1
 Const CASCADE_MOVE_REQUEST_PACKET_SIZE:Size_T = 7
 Const CASCADE_MOVE_APPLIED_PACKET_SIZE:Size_T = 17
 Const CASCADE_STATE_HEADER_SIZE:Size_T = 22
@@ -30,16 +32,53 @@ Struct SCascadeMatchConfig
 	Field size:Int
 	Field playerCount:Int
 	Field startingPlayer:Int
+	Field colour0:Int
+	Field colour1:Int
+	Field colour2:Int
+	Field colour3:Int
 
 	Method New(layout:ECascadeBoardLayout, size:Int, playerCount:Int, startingPlayer:Int = 0)
 		Self.layout = layout
 		Self.size = size
 		Self.playerCount = playerCount
 		Self.startingPlayer = startingPlayer
+		colour0 = 0
+		colour1 = 1
+		colour2 = 2
+		colour3 = 3
+	End Method
+
+	Method PlayerColour:Int(player:Int)
+		Select player
+			Case 0 Return colour0
+			Case 1 Return colour1
+			Case 2 Return colour2
+			Case 3 Return colour3
+		End Select
+		Return -1
+	End Method
+
+	Method SetPlayerColour:Int(player:Int, colour:Int)
+		If colour < 0 Or colour >= 6 Then Return False
+		Select player
+			Case 0 colour0 = colour
+			Case 1 colour1 = colour
+			Case 2 colour2 = colour
+			Case 3 colour3 = colour
+			Default Return False
+		End Select
+		Return True
 	End Method
 
 	Method IsValid:Int()
 		If startingPlayer < 0 Or startingPlayer >= playerCount Then Return False
+		For Local player:Int = 0 Until playerCount
+			Local colour:Int = PlayerColour(player)
+			If colour < 0 Or colour >= 6 Then Return False
+			For Local other:Int = 0 Until player
+				If PlayerColour(other) = colour Then Return False
+			Next
+		Next
 		Select layout
 			Case ECascadeBoardLayout.Square
 				Return size >= 3 And size * size <= CASCADE_MAX_CELLS And (playerCount = 2 Or playerCount = 4)
@@ -99,6 +138,9 @@ Function EncodeCascadeConfig:Size_T(buffer:Byte Ptr, capacity:Size_T, config:SCa
 	writer.WriteUInt8(UInt(config.size))
 	writer.WriteUInt8(UInt(config.playerCount))
 	writer.WriteUInt8(UInt(config.startingPlayer))
+	For Local player:Int = 0 Until CASCADE_MAX_PLAYERS
+		writer.WriteUInt8(UInt(config.PlayerColour(player)))
+	Next
 	If writer.Failed() Then Return 0
 	Return writer.Position()
 End Function
@@ -106,9 +148,27 @@ End Function
 Function DecodeCascadeConfig:Int(packet:SPacketView, config:SCascadeMatchConfig Var)
 	Local reader:SPacketReader = New SPacketReader(packet)
 	Local version:UInt, layout:UInt, size:UInt, playerCount:UInt, startingPlayer:UInt
-	If Not reader.ReadUInt8(version) Or version <> CASCADE_PROTOCOL_VERSION Or Not reader.ReadUInt8(layout) Or Not reader.ReadUInt8(size) Or Not reader.ReadUInt8(playerCount) Or Not reader.ReadUInt8(startingPlayer) Or reader.Remaining() <> 0 Then Return False
+	If Not reader.ReadUInt8(version) Or version <> CASCADE_PROTOCOL_VERSION Or Not reader.ReadUInt8(layout) Or Not reader.ReadUInt8(size) Or Not reader.ReadUInt8(playerCount) Or Not reader.ReadUInt8(startingPlayer) Then Return False
 	config = New SCascadeMatchConfig(ECascadeBoardLayout(layout), Int(size), Int(playerCount), Int(startingPlayer))
+	For Local player:Int = 0 Until CASCADE_MAX_PLAYERS
+		Local colour:UInt
+		If Not reader.ReadUInt8(colour) Or Not config.SetPlayerColour(player, Int(colour)) Then Return False
+	Next
+	If reader.Remaining() <> 0 Then Return False
 	Return config.IsValid()
+End Function
+
+Function EncodeCascadeColourRequest:Size_T(buffer:Byte Ptr, capacity:Size_T)
+	Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
+	writer.WriteUInt8(CASCADE_PROTOCOL_VERSION)
+	If writer.Failed() Then Return 0
+	Return writer.Position()
+End Function
+
+Function DecodeCascadeColourRequest:Int(packet:SPacketView)
+	Local reader:SPacketReader = New SPacketReader(packet)
+	Local version:UInt
+	Return reader.ReadUInt8(version) And version = CASCADE_PROTOCOL_VERSION And reader.Remaining() = 0
 End Function
 
 Function EncodeCascadeMoveRequest:Size_T(buffer:Byte Ptr, capacity:Size_T, request:SCascadeMoveRequest)

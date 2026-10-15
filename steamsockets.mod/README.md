@@ -18,6 +18,13 @@ delivery modes as the other GameNet backends. Its default payload limit is 1200
 bytes. `GetConnectionStatus` provides Steam's RTT, connection-quality, queue,
 and pending-byte diagnostics.
 
+Every factory accepts an optional `TSteamNetworkingSockets` instance. Normal
+applications omit it and use Steam's native interface. Tests and specialised
+hosts can supply a compatible implementation; the module's own deterministic
+tests use that boundary to cover connection callbacks, framing, sequencing,
+failure delivery, cleanup, and bounded event overflow without a running Steam
+client.
+
 Creating a dedicated server process does not require a hosting provider: the
 process can listen locally or on any machine controlled by the developer.
 Steam game-server identity, authentication, server registration, allocation,

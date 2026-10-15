@@ -74,6 +74,27 @@ See the [GameNet developer guide](NETWORKING_GUIDE.md) for choosing a session
 model, packet/MTU budgeting, capacity and memory sizing, deterministic rollback,
 mobile lifecycle recovery, and a practical testing strategy.
 
+## Tests
+
+Run every module test and backend-neutral example protocol test with:
+
+```sh
+./tests/run_all.sh /path/to/BlitzMax/bin/bmk
+```
+
+GameNet must be installed as the `mod/gamenet.mod` used by that `bmk`; the
+runner rejects a different checkout so it cannot accidentally validate stale
+installed modules. It creates an isolated output directory, installs the
+appropriate Steam runtime beside the test executables, skips the native
+GameKit transport test away from macOS, and retains all build and run logs.
+An explicit unused output directory can be supplied as the second argument.
+
+The suite requires the current `bcc2`/`bmk2` toolchain and the sibling Steam
+module. macOS runs additionally require `Apple.GameKit`. These dependencies
+are not all present in the currently published BlitzMax SDK setup action, so a
+hosted workflow should not be enabled until that action can provision the same
+toolchain used by supported GameNet builds.
+
 Install the repository as `mod/gamenet.mod` in a BlitzMax NG SDK:
 
 ```sh

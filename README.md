@@ -9,7 +9,10 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.Loopback` provides an in-process, preallocated transport for tests,
   local multiplayer, and protocol development.
 - `GameNet.ENet` provides UDP networking through ENet for direct and hosted
-  connections, including local-address discovery for LAN join screens.
+  connections, including local-address reporting for manual LAN join screens.
+- `GameNet.LANDiscovery` provides bounded, versioned UDP advertisement and
+  browsing so compatible ENet games can find one another on an IPv4 LAN
+  without accounts or an external service.
 - `GameNet.GameKit` adapts Apple Game Center real-time matches to the common
   transport contract on macOS and iOS.
 - `GameNet.GameKitOnline` adapts Game Center authentication and programmatic
@@ -130,10 +133,10 @@ state hashes, full-state recovery, confirmed effects, and a transport-neutral
 
 [`examples/orbital_salvage`](examples/orbital_salvage) is a playable
 authoritative game built around `GameNet.Replication`, with launchers for both
-GameKit matchmaking and direct ENet play on a local network. Two pilots collect
-and steal energy cores using replicated entities, reliable score state,
-unreliable movement snapshots, bounded player commands and pulse effects,
-priority scheduling, entity destruction, and respawn.
+GameKit matchmaking and direct ENet play with automatic discovery on a local
+network. Two pilots collect and steal energy cores using replicated entities,
+reliable score state, unreliable movement snapshots, bounded player commands
+and pulse effects, priority scheduling, entity destruction, and respawn.
 
 [`examples/counter_cascade`](examples/counter_cascade) begins a deterministic
 turn-based game for two to four players. Its data-driven route tables support
@@ -148,3 +151,7 @@ Networking Sockets connection and packet exchange over local IP. The companion
 [`examples/steam_sockets_dedicated`](examples/steam_sockets_dedicated) shows a
 bounded-duration headless echo server with Steam game-server login,
 advertisement, orderly shutdown, and a normal GameNet transport.
+
+[`examples/lan_discovery`](examples/lan_discovery) is a small headless host and
+joiner which discovers a compatible game, uses the returned endpoint to create
+an ENet connection, and exchanges a reliable greeting.

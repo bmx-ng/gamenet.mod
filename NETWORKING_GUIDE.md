@@ -42,11 +42,22 @@ advertisement, and player authentication are optional surrounding services.
 ## Decide how players find the match
 
 Two devices do not need an online service merely because they are playing a
-networked game. Devices on the same LAN can connect directly through ENet when
-the joining player knows the host address. A game can obtain that address from
-manual entry, a QR code, a small LAN browser, or its own application-specific
-exchange. Likewise, an Internet game can connect directly to a known public or
-dedicated-server address when routing and firewall configuration permit it.
+networked game. Devices on the same LAN can connect directly through ENet.
+`GameNet.LANDiscovery` supplies an optional local browser: the host advertises
+its game identifier, wire-protocol version, ENet port, player counts, flags and
+small application-defined metadata, while joining devices discover its source
+address automatically. Manual entry, a QR code, or an application-specific
+exchange remain valid alternatives. Likewise, an Internet game can connect
+directly to a known public or dedicated-server address when routing and
+firewall configuration permit it.
+
+LAN discovery is intentionally not an Internet rendezvous service. It uses
+bounded, unauthenticated UDP queries and replies on the local IPv4 network. A
+result is suitable for a join screen, not proof of identity: the subsequent
+GameNet session handshake must still validate the joining peer and game
+protocol. iOS applications must explain local-network access with
+`NSLocalNetworkUsageDescription`, and Android applications require the normal
+`INTERNET` permission.
 
 Online services solve the surrounding coordination problem. GameKit, Steam,
 Nakama, EOS, and similar systems can provide some combination of identity,

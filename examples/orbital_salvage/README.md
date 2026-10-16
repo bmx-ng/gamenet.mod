@@ -44,10 +44,13 @@ the same local network. Its iOS settings include a local-network usage message;
 the first launch may therefore display the standard iOS permission prompt.
 
 Start the program on both devices and select **Host Game** on one of them. The
-host screen displays its preferred LAN IPv4 address and UDP port. Enter that
-address in the second device's **Host Address** field and select **Join Game**.
-This version requires no Game Center accounts or Internet matchmaking service.
-The displayed address is local to the current network and may change when the
+host advertises the game on the local network, where it appears in the second
+device's **Games on This Network** list. Select that row to connect. If
+discovery is unavailable on a particular network, the host also displays its
+preferred LAN IPv4 address and UDP port; enter the address in the second
+device's **Manual Address** field and select **Join Manually**. This version
+requires no Game Center accounts or Internet matchmaking service. The
+displayed address is local to the current network and may change when the
 device joins another network.
 
 ## Controls and tests

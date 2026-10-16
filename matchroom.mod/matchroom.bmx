@@ -371,7 +371,7 @@ Type TMatchRoom
 			Case EMatchRoomCommand.Synchronize
 				Return SendStateTo(player) = ETransportResult.Ok
 			Case EMatchRoomCommand.Ready
-				Return ApplyReady(player, value) = ETransportResult.Ok
+				Return ApplyReady(player, Int(value)) = ETransportResult.Ok
 			Case EMatchRoomCommand.ReturnToRoom
 				Return ApplyReturn(player) = ETransportResult.Ok
 		End Select

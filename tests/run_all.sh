@@ -63,10 +63,12 @@ platform=$(uname -s)
 architecture=$(uname -m)
 executable_suffix=
 steam_runtime=
+eos_runtime=
 
 case "$platform" in
 	Darwin)
 		steam_runtime="$sdk_root/mod/steam.mod/steamsdk.mod/sdk/redistributable_bin/osx/libsteam_api.dylib"
+		eos_runtime="$sdk_root/mod/eos.mod/sdk.mod/SDK/Bin/libEOSSDK-Mac-Shipping.dylib"
 		;;
 	Linux)
 		case "$architecture" in
@@ -76,10 +78,18 @@ case "$platform" in
 			*) echo "Unsupported Linux architecture: $architecture" >&2; exit 1 ;;
 		esac
 		steam_runtime="$sdk_root/mod/steam.mod/steamsdk.mod/sdk/redistributable_bin/$steam_directory/libsteam_api.so"
+		case "$architecture" in
+			x86_64|amd64) eos_runtime="$sdk_root/mod/eos.mod/sdk.mod/SDK/Bin/libEOSSDK-Linux-Shipping.so" ;;
+			aarch64|arm64) eos_runtime="$sdk_root/mod/eos.mod/sdk.mod/SDK/Bin/libEOSSDK-LinuxArm64-Shipping.so" ;;
+		esac
 		;;
 	MINGW*|MSYS*)
 		executable_suffix=.exe
 		steam_runtime="$sdk_root/mod/steam.mod/steamsdk.mod/sdk/redistributable_bin/win64/steam_api64.dll"
+		case "$architecture" in
+			aarch64|arm64) eos_runtime="$sdk_root/mod/eos.mod/sdk.mod/SDK/Bin/EOSSDK-Win64-Shippingarm64.dll" ;;
+			*) eos_runtime="$sdk_root/mod/eos.mod/sdk.mod/SDK/Bin/EOSSDK-Win64-Shipping.dll" ;;
+		esac
 		;;
 	*)
 		echo "Unsupported test host: $platform" >&2
@@ -93,6 +103,13 @@ then
 	exit 1
 fi
 cp "$steam_runtime" "$output_root/$(basename -- "$steam_runtime")"
+
+if test ! -f "$eos_runtime"
+then
+	echo "EOS runtime was not found: $eos_runtime" >&2
+	exit 1
+fi
+cp "$eos_runtime" "$output_root/$(basename -- "$eos_runtime")"
 
 if test "$platform" = Darwin && test ! -d "$sdk_root/mod/apple.mod/gamekit.mod"
 then

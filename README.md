@@ -27,6 +27,8 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.EOSP2P` adapts Epic Online Services Product User IDs and P2P sockets
   to the common transport contract, including connection notifications and
   unreliable-sequenced packet handling.
+- `GameNet.EOSOnline` adapts EOS lobbies, invitations, and lobby membership to
+  `GameNet.Online`, handing an `EOSP2P` transport to a host/client game session.
 - `GameNet.Online` defines an optional common contract for online identity,
   lobbies, invitations, matchmaking, and handing a connected transport to a
   game. Service adapters can target GameKit, Steam, Nakama, EOS, or future

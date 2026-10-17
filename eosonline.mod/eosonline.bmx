@@ -40,6 +40,10 @@ Type TEOSOnlineLobbySnapshot
 	Field MaximumPlayers:Int
 	Field AvailableSlots:Int
 	Field Joinable:Int
+	' GameNet creates EOS lobbies with invitations enabled and disables them in
+	' the same owner update that publishes match start. Unlike custom lobby
+	' attributes, EOS exposes this core state reliably to joined members.
+	Field StartSignaled:Int
 	Field MemberIds:String[] = New String[0]
 	Field Properties:TOnlineProperties = New TOnlineProperties
 End Type
@@ -78,7 +82,9 @@ Interface IEOSOnlineBackend
 	Method LeaveLobby:Int(lobbyId:String, owner:Int)
 	Method PublishStart:Int(lobbyId:String)
 	Method InvitePlayer:Int(lobbyId:String, productUserId:String)
-	Method CreateTransport:INetTransport(remoteUserIds:String[], socketName:String, channelCount:Int, maxPacketSize:Size_T)
+	Method LobbySnapshot:TEOSOnlineLobbySnapshot(lobbyId:String)
+	Method TransportError:String()
+	Method CreateTransport:INetTransport(remoteUserIds:String[], socketName:String, channelCount:Int, maxPacketSize:Size_T, initiateConnections:Int)
 	Method Shutdown()
 End Interface
 
@@ -111,6 +117,7 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 	Field _memberStatusSubscription:TEOSLobbyMemberStatusReceivedSubscription
 	Field _inviteReceivedSubscription:TEOSLobbyInviteReceivedSubscription
 	Field _inviteAcceptedSubscription:TEOSLobbyInviteAcceptedSubscription
+	Field _transportError:String
 
 	Public
 	Method New(platform:TEOSPlatform, localUserId:TEOSProductUserId, localDisplayName:String)
@@ -156,6 +163,7 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 		result.MaximumPlayers = Int(info.MaxMembers)
 		result.AvailableSlots = Int(info.AvailableSlots)
 		result.Joinable = info.AvailableSlots > 0
+		result.StartSignaled = Not info.AllowInvites
 		Local memberCount:Int = Int(details.MemberCount())
 		result.MemberIds = New String[memberCount]
 		For Local index:Int = 0 Until memberCount
@@ -170,10 +178,19 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 					result.Name = attribute.StringValue
 				Case EOS_ONLINE_JOINABLE_KEY
 					result.Joinable = attribute.StringValue <> "0" And info.AvailableSlots > 0
+					' Keep the owner's explicit value in the internal snapshot too. A
+					' full lobby is also not joinable, so Joinable alone cannot tell a
+					' waiting client that the owner actually published match start.
+					result.Properties.Set(attribute.Key, attribute.StringValue)
 				Default
 					result.Properties.Set(attribute.Key, attribute.StringValue)
 			End Select
 		Next
+		' Preserve a uniform start marker for the public lobby view even when the
+		' joined-member cache omits custom attributes from CopyDetails.
+		Local startFound:Int
+		If result.Properties.Value(EOS_ONLINE_START_KEY, startFound) = "1" Then result.StartSignaled = True
+		If result.StartSignaled And Not startFound Then result.Properties.Set(EOS_ONLINE_START_KEY, "1")
 		Return result
 	End Method
 
@@ -327,13 +344,24 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 		Return _inviteRequest <> Null
 	End Method
 
-	Method CreateTransport:INetTransport(remoteUserIds:String[], socketName:String, channelCount:Int, maxPacketSize:Size_T) Override
+	Method LobbySnapshot:TEOSOnlineLobbySnapshot(lobbyId:String) Override
+		Return CurrentSnapshot(lobbyId)
+	End Method
+
+	Method CreateTransport:INetTransport(remoteUserIds:String[], socketName:String, channelCount:Int, maxPacketSize:Size_T, initiateConnections:Int) Override
+		_transportError = ""
 		Local ids:TEOSProductUserId[] = New TEOSProductUserId[remoteUserIds.Length]
 		For Local index:Int = 0 Until remoteUserIds.Length
 			ids[index] = TEOSProductUserId.FromString(remoteUserIds[index])
-			If Not ids[index] Or Not ids[index].IsValid() Then Return Null
+			If Not ids[index] Or Not ids[index].IsValid() Then _transportError = "Lobby contained an invalid Product User ID"; Return Null
 		Next
-		Return TEOSP2PTransport.Create(_platform, _p2p, _localUserId, ids, socketName, channelCount, maxPacketSize, True)
+		Local transport:INetTransport = TEOSP2PTransport.Create(_platform, _p2p, _localUserId, ids, socketName, channelCount, maxPacketSize, True, initiateConnections)
+		If Not transport Then _transportError = EOSP2PTransportCreateError()
+		Return transport
+	End Method
+
+	Method TransportError:String() Override
+		Return _transportError
 	End Method
 
 	Method Shutdown() Override
@@ -495,6 +523,7 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Field _readyTransport:INetTransport
 	Field _readyMatchInfo:SOnlineMatchInfo
 	Field _current:TEOSOnlineLobby
+	Field _nextLobbyRefreshAt:Int
 
 	Method New(backend:IEOSOnlineBackend, bucketId:String, socketName:String, channelCount:Int, maxPacketSize:Size_T)
 		_backend = backend; _bucketId = bucketId; _socketName = socketName
@@ -541,8 +570,13 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 
 	Method HasStarted:Int(snapshot:TEOSOnlineLobbySnapshot)
 		If Not snapshot Then Return False
+		If snapshot.StartSignaled Then Return True
 		Local found:Int
-		Return snapshot.Properties.Value(EOS_ONLINE_START_KEY, found) = "1" And found
+		If snapshot.Properties.Value(EOS_ONLINE_START_KEY, found) = "1" And found Then Return True
+		' PublishStart writes both attributes in one EOS lobby update. Treat the
+		' explicit owner-controlled joinable marker as a fallback because EOS can
+		' expose that attribute before the start marker in another member's cache.
+		Return snapshot.Properties.Value(EOS_ONLINE_JOINABLE_KEY, found) = "0" And found
 	End Method
 
 	Method PrepareMatch(snapshot:TEOSOnlineLobbySnapshot)
@@ -560,9 +594,13 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 		Else
 			remoteIds = [snapshot.OwnerId]
 		End If
-		_readyTransport = _backend.CreateTransport(remoteIds, _socketName, _channelCount, _maxPacketSize)
+		' The owner listens; joining peers initiate. This produces one EOS session
+		' per owner/client link instead of competing simultaneous session GUIDs.
+		_readyTransport = _backend.CreateTransport(remoteIds, _socketName, _channelCount, _maxPacketSize, Not host)
 		If Not _readyTransport Then
-			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.StartMatch, _startRequestId, EOnlineError.ProviderFailure, 0, snapshot.LobbyId, New SOnlinePlayer, "Could not create EOS P2P transport"))
+			Local detail:String = _backend.TransportError()
+			If Not detail Then detail = "Could not create EOS P2P transport"
+			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.StartMatch, _startRequestId, EOnlineError.ProviderFailure, 0, snapshot.LobbyId, New SOnlinePlayer, detail))
 			_startRequestId = 0
 			Return
 		End If
@@ -630,7 +668,18 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 		Return _openRequestId
 	End Method
 
-	Method Pump() Override If _state <> EOnlineServiceState.Closed Then _backend.Pump() End Method
+	Method Pump() Override
+		If _state = EOnlineServiceState.Closed Then Return
+		_backend.Pump()
+		If _state = EOnlineServiceState.Ready And _current And MilliSecs() >= _nextLobbyRefreshAt Then
+			_nextLobbyRefreshAt = MilliSecs() + 250
+			Local snapshot:TEOSOnlineLobbySnapshot = _backend.LobbySnapshot(_current.Id())
+			If snapshot Then
+				_current = Lobby(snapshot)
+				If _startRequestId And HasStarted(snapshot) Then PrepareMatch(snapshot)
+			End If
+		End If
+	End Method
 	Method Poll:Int(event:SOnlineEvent Var) Override
 		If _eventCount = 0 Then event = New SOnlineEvent; Return False
 		event = _events[_eventRead]; _events[_eventRead] = New SOnlineEvent

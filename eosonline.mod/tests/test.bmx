@@ -47,6 +47,9 @@ Type TMockEOSOnlineBackend Implements IEOSOnlineBackend
 	Field transport:TMockTransport
 	Field shutdownCalled:Int
 	Field pumpCount:Int
+	Field snapshot:TEOSOnlineLobbySnapshot
+	Field transportError:String
+	Field transportInitiated:Int
 
 	Method Initialize:Int(value:IEOSOnlineBackendListener)
 		listener = value
@@ -90,8 +93,15 @@ Type TMockEOSOnlineBackend Implements IEOSOnlineBackend
 		invitedId = productUserId
 		Return True
 	End Method
-	Method CreateTransport:INetTransport(remoteUserIds:String[], socketName:String, channelCount:Int, maxPacketSize:Size_T)
+	Method LobbySnapshot:TEOSOnlineLobbySnapshot(lobbyId:String)
+		Return snapshot
+	End Method
+	Method TransportError:String()
+		Return transportError
+	End Method
+	Method CreateTransport:INetTransport(remoteUserIds:String[], socketName:String, channelCount:Int, maxPacketSize:Size_T, initiateConnections:Int)
 		transportIds = remoteUserIds[..]
+		transportInitiated = initiateConnections
 		transport = New TMockTransport
 		Return transport
 	End Method
@@ -109,8 +119,10 @@ Function Snapshot:TEOSOnlineLobbySnapshot(localId:String, ownerId:String, starte
 	result.MaximumPlayers = 4
 	result.AvailableSlots = 2
 	result.Joinable = Not started
+	result.StartSignaled = started
 	result.MemberIds = [ownerId, localId]
 	result.Properties.Set("mode", "duel")
+	result.Properties.Set(EOS_ONLINE_JOINABLE_KEY, String(Int(Not started)))
 	result.Properties.Set(EOS_ONLINE_START_KEY, String(Int(started <> 0)))
 	Return result
 End Function
@@ -150,6 +162,7 @@ Local info:SOnlineMatchInfo
 Check(event.RequestId() = startRequest And host.MatchInfo(startRequest, info), "correlate host match")
 Check(info.IsSessionHost() And info.PlayerCount() = 2, "host match information")
 Check(hostBackend.transportIds.Length = 1 And hostBackend.transportIds[0] = "remote-puid", "host transport contains remote member")
+Check(Not hostBackend.transportInitiated, "host transport listens without opening a competing EOS session")
 Check(host.TakeMatchTransport(startRequest) <> Null, "take host transport")
 
 ' A client discovers and joins the lobby, then waits for the owner's start flag.
@@ -180,6 +193,25 @@ NextEvent(client, EOnlineEventKind.LobbyChanged)
 event = NextEvent(client, EOnlineEventKind.MatchReady)
 Check(client.MatchInfo(startRequest, info) And Not info.IsSessionHost() And info.SessionHostPeer().IsValid(), "publish client match information")
 Check(clientBackend.transportIds.Length = 1 And clientBackend.transportIds[0] = "local-puid", "client transport targets lobby owner")
+Check(clientBackend.transportInitiated, "client transport initiates the EOS session")
+
+' EOS may make the owner's closed-lobby marker visible before the start
+' attribute. It is the second half of the same atomic PublishStart update.
+Local fallbackBackend:TMockEOSOnlineBackend = New TMockEOSOnlineBackend
+fallbackBackend.localId = "remote-puid"
+Local fallback:TEOSOnlineService = TEOSOnlineService.CreateForBackend(fallbackBackend, "duel")
+fallback.Open(); NextEvent(fallback, EOnlineEventKind.ServiceReady)
+fallback.OnEOSOnlineLobbyJoined(EEOSResult.Success, Snapshot("remote-puid", "local-puid"))
+NextEvent(fallback, EOnlineEventKind.LobbyJoined)
+Local fallbackStart:UInt = fallback.StartMatch()
+Local fallbackSnapshot:TEOSOnlineLobbySnapshot = Snapshot("remote-puid", "local-puid")
+fallbackSnapshot.Joinable = False
+fallbackSnapshot.Properties.Set(EOS_ONLINE_JOINABLE_KEY, "0")
+fallbackSnapshot.Properties.Set(EOS_ONLINE_START_KEY, "")
+fallback.OnEOSOnlineLobbyChanged(fallbackSnapshot, "local-puid", EEOSLobbyMemberStatus.Joined)
+NextEvent(fallback, EOnlineEventKind.LobbyChanged)
+event = NextEvent(fallback, EOnlineEventKind.MatchReady)
+Check(event.RequestId() = fallbackStart, "closed-lobby start marker releases waiting client")
 
 client.OnEOSOnlineInvitation("invite-7", "lobby-7", "friend-puid", False)
 event = NextEvent(client, EOnlineEventKind.InvitationReceived)

@@ -40,6 +40,17 @@ Const EOS_P2P_CONTROL_DELIVERY:UInt = 255
 Const EOS_P2P_DEFAULT_MAX_PACKET_SIZE:Size_T = EOS_P2P_MAX_PACKET_SIZE - EOS_P2P_FRAME_HEADER_SIZE
 Const EOS_P2P_MAX_SKIPPED_PACKETS_PER_POLL:Int = 32
 
+Private
+Global _eosP2PTransportCreateError:String
+Public
+
+Rem
+bbdoc: Returns a diagnostic for the most recent failed transport creation on this thread.
+End Rem
+Function EOSP2PTransportCreateError:String()
+	Return _eosP2PTransportCreateError
+End Function
+
 Enum EEOSP2PTransportError:Int
 	InvalidFrame = 1
 	UnknownPeer = 2
@@ -125,7 +136,9 @@ Type TEOSNativeP2PBackend Implements IEOSP2PTransportBackend
 		options.Data = data
 		options.AllowDelayedDelivery = True
 		options.Reliability = reliability
-		options.DisableAutoAcceptConnection = True
+		' Every destination has already been admitted from the lobby roster. EOS
+		' must be allowed to open the connection for this first outbound packet.
+		options.DisableAutoAcceptConnection = False
 		Return _p2p.SendPacket(options)
 	End Method
 
@@ -231,12 +244,20 @@ Type TEOSP2PTransport Implements INetTransport, IEOSP2PConnectionRequestListener
 		Return frame
 	End Method
 
-	Method Start:Int()
-		If Not _backend.InstallListeners(Self, Self, Self, Self, Self) Then Return False
+	Method Start:Int(initiateConnections:Int)
+		If Not _backend.InstallListeners(Self, Self, Self, Self, Self) Then
+			_eosP2PTransportCreateError = "EOS P2P notification registration failed"
+			Return False
+		End If
+		' A session host only needs to listen. Having both peers send the initial
+		' probe can create two EOS session GUIDs for the same socket and leave the
+		' connection stuck resolving the collision.
+		If Not initiateConnections Then Return True
 		Local probe:Byte[] = BuildFrame(EOS_P2P_CONTROL_DELIVERY, 0)
 		For Local index:Int = 0 Until _remoteUserIds.Length
 			Local result:EEOSResult = _backend.Send(_remoteUserIds[index], 0, probe, EEOSPacketReliability.ReliableOrdered)
 			If result <> EEOSResult.Success Then
+				_eosP2PTransportCreateError = "EOS P2P connection probe failed: " + EOSResultString(result)
 				_backend.RemoveListeners()
 				Return False
 			End If
@@ -273,26 +294,32 @@ Type TEOSP2PTransport Implements INetTransport, IEOSP2PConnectionRequestListener
 	End Method
 
 	Public
-	Function Create:TEOSP2PTransport(platform:TEOSPlatform, p2p:TEOSP2P, localUserId:TEOSProductUserId, remoteUserIds:TEOSProductUserId[], socketName:String, channelCount:Int = 4, maxPacketSize:Size_T = EOS_P2P_DEFAULT_MAX_PACKET_SIZE, pumpPlatform:Int = True)
-		If Not platform Or Not platform.IsValid() Or Not p2p Or Not localUserId Or Not localUserId.IsValid() Then Return Null
+	Function Create:TEOSP2PTransport(platform:TEOSPlatform, p2p:TEOSP2P, localUserId:TEOSProductUserId, remoteUserIds:TEOSProductUserId[], socketName:String, channelCount:Int = 4, maxPacketSize:Size_T = EOS_P2P_DEFAULT_MAX_PACKET_SIZE, pumpPlatform:Int = True, initiateConnections:Int = True)
+		_eosP2PTransportCreateError = ""
+		If Not platform Or Not platform.IsValid() Or Not p2p Or Not localUserId Or Not localUserId.IsValid() Then
+			_eosP2PTransportCreateError = "EOS platform, P2P interface, or local Product User is invalid"
+			Return Null
+		End If
 		Local backend:IEOSP2PTransportBackend = New TEOSNativeP2PBackend(platform, p2p, localUserId, socketName, pumpPlatform)
-		Return CreateWithBackend(remoteUserIds, socketName, channelCount, maxPacketSize, backend)
+		Return CreateWithBackend(remoteUserIds, socketName, channelCount, maxPacketSize, backend, initiateConnections)
 	End Function
 
-	Function CreateWithBackend:TEOSP2PTransport(remoteUserIds:TEOSProductUserId[], socketName:String, channelCount:Int, maxPacketSize:Size_T, backend:IEOSP2PTransportBackend)
-		If Not backend Or Not remoteUserIds Or remoteUserIds.Length = 0 Or remoteUserIds.Length > EOS_P2P_MAX_CONNECTIONS Then Return Null
-		If socketName.Length < 1 Or socketName.Length > 32 Or channelCount < 1 Or channelCount > 256 Then Return Null
-		If maxPacketSize < 1 Or maxPacketSize > EOS_P2P_DEFAULT_MAX_PACKET_SIZE Then Return Null
+	Function CreateWithBackend:TEOSP2PTransport(remoteUserIds:TEOSProductUserId[], socketName:String, channelCount:Int, maxPacketSize:Size_T, backend:IEOSP2PTransportBackend, initiateConnections:Int = True)
+		_eosP2PTransportCreateError = ""
+		If Not backend Or Not remoteUserIds Or remoteUserIds.Length = 0 Or remoteUserIds.Length > EOS_P2P_MAX_CONNECTIONS Then _eosP2PTransportCreateError = "EOS P2P backend or remote peer count is invalid"; Return Null
+		If socketName.Length < 1 Or socketName.Length > 32 Or channelCount < 1 Or channelCount > 256 Then _eosP2PTransportCreateError = "EOS P2P socket name or channel count is invalid"; Return Null
+		If maxPacketSize < 1 Or maxPacketSize > EOS_P2P_DEFAULT_MAX_PACKET_SIZE Then _eosP2PTransportCreateError = "EOS P2P packet size is invalid"; Return Null
 		Local idText:String[] = New String[remoteUserIds.Length]
 		For Local index:Int = 0 Until remoteUserIds.Length
-			If Not remoteUserIds[index] Or Not remoteUserIds[index].IsValid() Then Return Null
+			If Not remoteUserIds[index] Or Not remoteUserIds[index].IsValid() Then _eosP2PTransportCreateError = "A remote EOS Product User is invalid"; Return Null
 			idText[index] = remoteUserIds[index].ToString()
 			For Local earlier:Int = 0 Until index
-				If idText[earlier] = idText[index] Then Return Null
+				If idText[earlier] = idText[index] Then _eosP2PTransportCreateError = "A remote EOS Product User is duplicated"; Return Null
 			Next
 		Next
 		Local transport:TEOSP2PTransport = New TEOSP2PTransport(backend, remoteUserIds, socketName, channelCount, maxPacketSize)
-		If Not transport.Start() Then Return Null
+		If Not transport.Start(initiateConnections) Then Return Null
+		_eosP2PTransportCreateError = ""
 		Return transport
 	End Function
 

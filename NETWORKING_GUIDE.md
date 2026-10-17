@@ -90,6 +90,15 @@ the provider for Networking Sockets, making the lobby owner a P2P listener and
 connecting the remaining members to it. Steam lobby discovery stays separate
 from either transport, matching the service/transport split in GameNet.
 
+`GameNet.EOSOnline` follows the same split for Epic Online Services. The game
+first completes EOS Auth and Connect, then constructs `TEOSOnlineService` with
+the resulting platform and local Product User ID. The adapter does not own or
+release either object. It provides searchable, bucket-partitioned lobbies,
+invitations, lobby-owner start signalling, and an `EOSP2P` match transport.
+Continue pumping the online service while its lobby is in use. The transferred
+transport also ticks its platform when polled, so it remains operational if the
+online service is subsequently closed.
+
 When an allocator or developer-owned host supplies a dedicated endpoint, the
 lobby owner can publish it through `TSteamOnlineService.SetDedicatedServer`.
 All lobby members then receive client transports connected to that server. The

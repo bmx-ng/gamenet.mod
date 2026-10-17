@@ -24,6 +24,9 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.SteamOnline` implements online identity, searchable lobbies,
   invitations, lobby ownership, peer-hosted match startup, and routing lobby
   members to a known dedicated server with Steam.
+- `GameNet.EOSP2P` adapts Epic Online Services Product User IDs and P2P sockets
+  to the common transport contract, including connection notifications and
+  unreliable-sequenced packet handling.
 - `GameNet.Online` defines an optional common contract for online identity,
   lobbies, invitations, matchmaking, and handing a connected transport to a
   game. Service adapters can target GameKit, Steam, Nakama, EOS, or future
@@ -88,15 +91,16 @@ Run every module test and backend-neutral example protocol test with:
 GameNet must be installed as the `mod/gamenet.mod` used by that `bmk`; the
 runner rejects a different checkout so it cannot accidentally validate stale
 installed modules. It creates an isolated output directory, installs the
-appropriate Steam runtime beside the test executables, skips the native
-GameKit transport test away from macOS, and retains all build and run logs.
+appropriate Steam and EOS runtimes beside the test executables, skips the
+native GameKit transport test away from macOS, and retains all build and run logs.
 An explicit unused output directory can be supplied as the second argument.
 
 The suite requires the current `bcc2`/`bmk2` toolchain and the sibling Steam
 module. macOS runs additionally require `Apple.GameKit`. These dependencies
 are not all present in the currently published BlitzMax SDK setup action, so a
 hosted workflow should not be enabled until that action can provision the same
-toolchain used by supported GameNet builds.
+toolchain used by supported GameNet builds. The EOS SDK must be installed in
+the sibling `mod/eos.mod/sdk.mod/SDK` directory.
 
 Install the repository as `mod/gamenet.mod` in a BlitzMax NG SDK:
 

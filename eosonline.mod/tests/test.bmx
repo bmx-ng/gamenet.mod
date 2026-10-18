@@ -7,6 +7,46 @@ Function Check(condition:Int, message:String)
 	If Not condition Then Throw "FAILED: " + message
 End Function
 
+Type TMockEOSSessionBackend Implements IEOSSessionBackend
+	Method Initialize:Int(authStatusListener:IEOSAuthLoginStatusListener, authExpirationListener:IEOSConnectAuthExpirationListener, connectStatusListener:IEOSConnectLoginStatusListener)
+		Return True
+	End Method
+
+	Method LoginAuth:Int(options:TEOSAuthLoginOptions, listener:IEOSAuthLoginListener)
+		Return True
+	End Method
+
+	Method CopyIdToken:EEOSResult(accountId:TEOSEpicAccountId, token:TEOSAuthIdToken Var)
+		token = New TEOSAuthIdToken
+		token.AccountId = accountId
+		token.JsonWebToken = "token"
+		Return EEOSResult.Success
+	End Method
+
+	Method LoginConnect:Int(options:TEOSConnectLoginOptions, listener:IEOSConnectLoginListener)
+		Return True
+	End Method
+
+	Method CreateProductUser:Int(continuanceToken:TEOSConnectContinuanceToken, listener:IEOSConnectCreateUserListener)
+		Return True
+	End Method
+
+	Method LogoutConnect:Int(userId:TEOSProductUserId, listener:IEOSConnectLogoutListener)
+		Return True
+	End Method
+
+	Method LogoutAuth:Int(accountId:TEOSEpicAccountId, listener:IEOSAuthLogoutListener)
+		Return True
+	End Method
+
+	Method DeletePersistentAuth:Int(listener:IEOSAuthDeletePersistentAuthListener, refreshToken:String)
+		Return True
+	End Method
+
+	Method Shutdown()
+	End Method
+End Type
+
 Type TMockTransport Implements INetTransport
 	Field open:Int = True
 	Method Poll:Int(event:SNetEvent Var)
@@ -133,6 +173,33 @@ Function NextEvent:SOnlineEvent(service:TEOSOnlineService, expected:EOnlineEvent
 	Check(event.Kind() = expected, "expected event " + Int(expected) + ", got " + Int(event.Kind()))
 	Return event
 End Function
+
+' A managed EOS session supplies identity and reports confirmed session loss.
+Local managedSessionBackend:TMockEOSSessionBackend = New TMockEOSSessionBackend
+Local managedSession:TEOSSessionCoordinator = TEOSSessionCoordinator.CreateForBackend(managedSessionBackend)
+Local managedCredentials:TEOSAuthCredentials = New TEOSAuthCredentials
+managedCredentials.Type = EEOSLoginCredentialType.Developer
+Local managedLogin:TEOSAuthLoginOptions = New TEOSAuthLoginOptions
+managedLogin.Credentials = managedCredentials
+Local managedOptions:TEOSSessionOptions = New TEOSSessionOptions
+managedOptions.LoginOptions = managedLogin
+managedOptions.InitialRetryDelay = 10000
+Check(managedSession.Start(managedOptions), "start managed EOS session")
+Local managedAccountId:TEOSEpicAccountId = TEOSEpicAccountId._Create(Byte Ptr(1))
+Local managedUserId:TEOSProductUserId = TEOSProductUserId._Create(Byte Ptr(2))
+managedSession.OnEOSAuthLogin(EEOSResult.Success, managedAccountId, Null, Null, Null)
+managedSession.OnEOSConnectLogin(EEOSResult.Success, managedUserId, Null)
+Check(managedSession.IsReady(), "managed EOS session is ready")
+Local managedBackend:TMockEOSOnlineBackend = New TMockEOSOnlineBackend
+Local managedService:TEOSOnlineService = TEOSOnlineService.CreateForBackend(managedBackend, "duel", "GAMENET", 2, 900, managedSession)
+Check(managedService <> Null, "create online service from managed session")
+managedService.Open()
+NextEvent(managedService, EOnlineEventKind.ServiceReady)
+managedSession.OnEOSConnectLoginStatusChanged(managedUserId, EEOSLoginStatus.LoggedIn, EEOSLoginStatus.NotLoggedIn)
+managedService.Pump()
+Local managedFailure:SOnlineEvent = NextEvent(managedService, EOnlineEventKind.OperationFailed)
+Check(managedService.State() = EOnlineServiceState.Failed, "lost EOS session fails the online service")
+Check(managedFailure.Error() = EOnlineError.Authentication, "session loss is reported as authentication failure")
 
 ' Lobby owner creates a lobby, publishes start, and receives all remote peers.
 Local hostBackend:TMockEOSOnlineBackend = New TMockEOSOnlineBackend

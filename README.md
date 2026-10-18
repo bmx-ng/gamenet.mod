@@ -29,6 +29,8 @@ Transport-independent building blocks for real-time multiplayer games.
   unreliable-sequenced packet handling.
 - `GameNet.EOSOnline` adapts EOS lobbies, invitations, and lobby membership to
   `GameNet.Online`, handing an `EOSP2P` transport to a host/client game session.
+  It accepts a ready `TEOSSessionCoordinator`, so games do not need to pass
+  Auth tokens or Product User identifiers through their multiplayer code.
 - `GameNet.Online` defines an optional common contract for online identity,
   lobbies, invitations, matchmaking, and handing a connected transport to a
   game. Service adapters can target GameKit, Steam, Nakama, EOS, or future
@@ -166,3 +168,21 @@ an ENet connection, and exchanges a reliable greeting.
 signs in two Developer Authentication Tool accounts, creates and discovers an
 EOS lobby, joins it, starts a GameNet match, and verifies reliable PING/PONG
 over the resulting EOS P2P transport.
+
+For application code, create the online service from the managed session after
+its `OnEOSSessionReady` event:
+
+```blitzmax
+Local online:TEOSOnlineService = TEOSOnlineService.Create( ..
+	session, ..
+	playerDisplayName, ..
+	"my-game-mode")
+
+online.Open()
+
+' This also ticks the managed EOS session.
+online.Pump()
+```
+
+The existing factory accepting `TEOSPlatform` and `TEOSProductUserId` remains
+available for applications which deliberately manage EOS identity themselves.

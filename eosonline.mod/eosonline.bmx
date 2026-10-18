@@ -13,11 +13,12 @@ Module GameNet.EOSOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 ModuleInfo "History: 0.1 Initial EOS lobby and P2P match provider"
+ModuleInfo "History: 0.2 Added managed EOS session integration"
 
 ?bmxng2 And Not android And Not ios
 
@@ -95,6 +96,7 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 	Field _p2p:TEOSP2P
 	Field _localUserId:TEOSProductUserId
 	Field _localDisplayName:String
+	Field _tickPlatform:Int
 	Field _listener:IEOSOnlineBackendListener
 	Field _createOptions:TOnlineLobbyOptions
 	Field _createLobbyId:String
@@ -120,12 +122,13 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 	Field _transportError:String
 
 	Public
-	Method New(platform:TEOSPlatform, localUserId:TEOSProductUserId, localDisplayName:String)
+	Method New(platform:TEOSPlatform, localUserId:TEOSProductUserId, localDisplayName:String, tickPlatform:Int = True)
 		_platform = platform
 		_lobby = platform.Lobby()
 		_p2p = platform.P2P()
 		_localUserId = localUserId
 		_localDisplayName = localDisplayName
+		_tickPlatform = tickPlatform
 	End Method
 
 	Private
@@ -242,7 +245,9 @@ Type TNativeEOSOnlineBackend Implements IEOSOnlineBackend, IEOSLobbyCreateListen
 	End Method
 
 	Method Pump() Override
-		_platform.Tick()
+		If _tickPlatform Then
+			_platform.Tick()
+		End If
 	End Method
 
 	Method LocalUserId:String() Override
@@ -500,6 +505,7 @@ End Type
 Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Private
 	Field _backend:IEOSOnlineBackend
+	Field _session:TEOSSessionCoordinator
 	Field _bucketId:String
 	Field _socketName:String
 	Field _channelCount:Int
@@ -525,9 +531,13 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Field _current:TEOSOnlineLobby
 	Field _nextLobbyRefreshAt:Int
 
-	Method New(backend:IEOSOnlineBackend, bucketId:String, socketName:String, channelCount:Int, maxPacketSize:Size_T)
-		_backend = backend; _bucketId = bucketId; _socketName = socketName
-		_channelCount = channelCount; _maxPacketSize = maxPacketSize
+	Method New(backend:IEOSOnlineBackend, bucketId:String, socketName:String, channelCount:Int, maxPacketSize:Size_T, session:TEOSSessionCoordinator = Null)
+		_backend = backend
+		_bucketId = bucketId
+		_socketName = socketName
+		_channelCount = channelCount
+		_maxPacketSize = maxPacketSize
+		_session = session
 	End Method
 
 	Method NextRequestId:UInt()
@@ -615,11 +625,18 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Method Failure(operation:EOnlineOperation, requestId:UInt, result:EEOSResult, subject:String, detail:String)
 		Local error:EOnlineError = EOnlineError.ProviderFailure
 		Select result
-			Case EEOSResult.NoConnection, EEOSResult.NetworkDisconnected error = EOnlineError.Network
-			Case EEOSResult.TimedOut error = EOnlineError.Timeout
-			Case EEOSResult.AccessDenied, EEOSResult.MissingPermissions error = EOnlineError.Rejected
-			Case EEOSResult.InvalidParameters error = EOnlineError.InvalidArgument
-			Case EEOSResult.Canceled error = EOnlineError.Cancelled
+			Case EEOSResult.NoConnection, EEOSResult.NetworkDisconnected
+				error = EOnlineError.Network
+			Case EEOSResult.TimedOut
+				error = EOnlineError.Timeout
+			Case EEOSResult.AuthExpired, EEOSResult.InvalidAuth, EEOSResult.InvalidUser
+				error = EOnlineError.Authentication
+			Case EEOSResult.AccessDenied, EEOSResult.MissingPermissions
+				error = EOnlineError.Rejected
+			Case EEOSResult.InvalidParameters
+				error = EOnlineError.InvalidArgument
+			Case EEOSResult.Canceled
+				error = EOnlineError.Cancelled
 		End Select
 		Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, error, Int(result), subject, New SOnlinePlayer, detail))
 	End Method
@@ -645,13 +662,36 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 
 	Public
 	Function Create:TEOSOnlineService(platform:TEOSPlatform, localUserId:TEOSProductUserId, localDisplayName:String, bucketId:String, socketName:String = "GAMENET", channelCount:Int = 4, maxPacketSize:Size_T = EOS_P2P_DEFAULT_MAX_PACKET_SIZE)
-		If Not platform Or Not platform.IsValid() Or Not localUserId Or Not localUserId.IsValid() Then Return Null
+		If Not platform Or Not platform.IsValid() Or Not localUserId Or Not localUserId.IsValid() Then
+			Return Null
+		End If
 		Return CreateForBackend(New TNativeEOSOnlineBackend(platform, localUserId, localDisplayName), bucketId, socketName, channelCount, maxPacketSize)
 	End Function
 
-	Function CreateForBackend:TEOSOnlineService(backend:IEOSOnlineBackend, bucketId:String, socketName:String = "GAMENET", channelCount:Int = 4, maxPacketSize:Size_T = EOS_P2P_DEFAULT_MAX_PACKET_SIZE)
-		If Not backend Or Not bucketId Or socketName.Length < 1 Or socketName.Length > 32 Or channelCount < 1 Or channelCount > 256 Or maxPacketSize < 1 Or maxPacketSize > EOS_P2P_DEFAULT_MAX_PACKET_SIZE Then Return Null
-		Return New TEOSOnlineService(backend, bucketId, socketName, channelCount, maxPacketSize)
+	Rem
+	bbdoc: Creates an EOS online service from a ready managed session.
+	about: The service pumps the session and observes session loss. The session
+	remains responsible for EOS platform ticking, so the native backend does not
+	tick the same platform a second time.
+	End Rem
+	Function Create:TEOSOnlineService(session:TEOSSessionCoordinator, localDisplayName:String, bucketId:String, socketName:String = "GAMENET", channelCount:Int = 4, maxPacketSize:Size_T = EOS_P2P_DEFAULT_MAX_PACKET_SIZE)
+		If Not session Or Not session.IsReady() Then
+			Return Null
+		End If
+		Local platform:TEOSPlatform = session.Platform()
+		Local localUserId:TEOSProductUserId = session.ProductUserId()
+		If Not platform Or Not platform.IsValid() Or Not localUserId Or Not localUserId.IsValid() Then
+			Return Null
+		End If
+		Local backend:IEOSOnlineBackend = New TNativeEOSOnlineBackend(platform, localUserId, localDisplayName, False)
+		Return CreateForBackend(backend, bucketId, socketName, channelCount, maxPacketSize, session)
+	End Function
+
+	Function CreateForBackend:TEOSOnlineService(backend:IEOSOnlineBackend, bucketId:String, socketName:String = "GAMENET", channelCount:Int = 4, maxPacketSize:Size_T = EOS_P2P_DEFAULT_MAX_PACKET_SIZE, session:TEOSSessionCoordinator = Null)
+		If Not backend Or Not bucketId Or socketName.Length < 1 Or socketName.Length > 32 Or channelCount < 1 Or channelCount > 256 Or maxPacketSize < 1 Or maxPacketSize > EOS_P2P_DEFAULT_MAX_PACKET_SIZE Then
+			Return Null
+		End If
+		Return New TEOSOnlineService(backend, bucketId, socketName, channelCount, maxPacketSize, session)
 	End Function
 
 	Method ProviderName:String() Override Return "Epic Online Services" End Method
@@ -660,15 +700,38 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Method LocalPlayer:SOnlinePlayer() Override If _state <> EOnlineServiceState.Ready Then Return New SOnlinePlayer Else Return Player(_backend.LocalUserId()) End Method
 
 	Method Open:UInt() Override
-		If _state <> EOnlineServiceState.Closed Then Return 0
-		_openRequestId = NextRequestId(); _state = EOnlineServiceState.Opening
-		If Not _backend.Initialize(Self) Then _state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, EEOSResult.InvalidState, "", "EOS platform, Product User, or Lobby notifications are unavailable"); Return _openRequestId
+		If _state <> EOnlineServiceState.Closed Then
+			Return 0
+		End If
+		_openRequestId = NextRequestId()
+		_state = EOnlineServiceState.Opening
+		If _session And Not _session.IsUsable() Then
+			_state = EOnlineServiceState.Failed
+			Failure(EOnlineOperation.Open, _openRequestId, _session.LastResult(), "", "EOS login session is not ready")
+			Return _openRequestId
+		End If
+		If Not _backend.Initialize(Self) Then
+			_state = EOnlineServiceState.Failed
+			Failure(EOnlineOperation.Open, _openRequestId, EEOSResult.InvalidState, "", "EOS platform, Product User, or Lobby notifications are unavailable")
+			Return _openRequestId
+		End If
 		_state = EOnlineServiceState.Ready
 		Queue(New SOnlineEvent(EOnlineEventKind.ServiceReady, EOnlineOperation.Open, _openRequestId, EOnlineError.None, 0, "", Player(_backend.LocalUserId()), ""))
 		Return _openRequestId
 	End Method
 
 	Method Pump() Override
+		If _session Then
+			_session.Tick()
+			If _state <> EOnlineServiceState.Closed And _state <> EOnlineServiceState.Failed And Not _session.IsUsable() Then
+				_backend.Shutdown()
+				_current = Null
+				_readyTransport = Null
+				_state = EOnlineServiceState.Failed
+				Failure(EOnlineOperation.None, 0, _session.LastResult(), "", "EOS login session ended")
+				Return
+			End If
+		End If
 		If _state = EOnlineServiceState.Closed Then Return
 		_backend.Pump()
 		If _state = EOnlineServiceState.Ready And _current And MilliSecs() >= _nextLobbyRefreshAt Then

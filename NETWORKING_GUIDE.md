@@ -66,6 +66,48 @@ allocation. `GameNet.Online` provides an optional common contract for that
 stage. A successful provider operation hands the game an `INetTransport`, after
 which the ordinary GameNet session and simulation layers take over.
 
+`GameNet.OnlineFlow` supplies the reusable state machine above that contract.
+The application asks it to host, find and join, accept an invitation, or start
+Quick Play. Quick Play prefers native matchmaking when the provider advertises
+it. Otherwise it searches for the first joinable lobby and can create one when
+the search is empty. The coordinator correlates asynchronous requests, waits
+for the configured player count, starts the provider match, and returns one
+`TOnlineMatchLaunch` containing both `SOnlineMatchInfo` and the transferred
+transport.
+
+```blitzmax
+Local flow:TOnlineFlowCoordinator = TOnlineFlowCoordinator.Create(online)
+If Not flow.Open() Then
+	Throw "Could not open the online service"
+End If
+
+' After the Ready flow event:
+Local request:TOnlineFlowRequest = New TOnlineFlowRequest
+request.lobbyOptions.minPlayers = 2
+request.lobbyOptions.maxPlayers = 2
+request.matchmakingRequest.minPlayers = 2
+request.matchmakingRequest.maxPlayers = 2
+request.startPolicy = EOnlineFlowStartPolicy.WhenMinimumPlayers
+flow.QuickPlay(request)
+
+' Pump and poll the coordinator rather than the provider directly.
+flow.Pump()
+Local event:SOnlineFlowEvent
+While flow.Poll(event)
+	If event.Kind() = EOnlineFlowEventKind.MatchReady Then
+		Local launch:TOnlineMatchLaunch = flow.TakeMatch()
+		' Create a host or client TNetSession from launch.Info() and
+		' launch.Transport().
+	End If
+Wend
+```
+
+The coordinator does not replace provider login, the provider adapter, or the
+game session. For example, `TEOSSessionCoordinator` maintains EOS Auth and
+Connect identity, `TEOSOnlineService` exposes EOS lobby operations, and
+`TOnlineFlowCoordinator` combines those operations into the requested player
+flow. `TNetSession` begins only after the match transport has been transferred.
+
 The interface is capability-based because providers are not interchangeable in
 every respect. Check a provider's advertised capabilities before displaying a
 feature, and use its native adapter API when the game needs something outside
@@ -90,14 +132,16 @@ the provider for Networking Sockets, making the lobby owner a P2P listener and
 connecting the remaining members to it. Steam lobby discovery stays separate
 from either transport, matching the service/transport split in GameNet.
 
-`GameNet.EOSOnline` follows the same split for Epic Online Services. The game
-first completes EOS Auth and Connect, then constructs `TEOSOnlineService` with
-the resulting platform and local Product User ID. The adapter does not own or
-release either object. It provides searchable, bucket-partitioned lobbies,
-invitations, lobby-owner start signalling, and an `EOSP2P` match transport.
-Continue pumping the online service while its lobby is in use. The transferred
-transport also ticks its platform when polled, so it remains operational if the
-online service is subsequently closed.
+`GameNet.EOSOnline` follows the same split for Epic Online Services. The
+preferred path constructs `TEOSOnlineService` from a ready
+`TEOSSessionCoordinator`, keeping Auth tokens and Product User identifiers out
+of application multiplayer code. A lower-level platform and Product User
+factory remains available for deliberate manual identity management. The
+adapter provides searchable, bucket-partitioned lobbies, invitations,
+lobby-owner start signalling, and an `EOSP2P` match transport. Continue pumping
+the online service or its online-flow coordinator while the lobby is in use.
+The transferred transport also ticks its platform when polled, so it remains
+operational if the online service is subsequently closed.
 
 When an allocator or developer-owned host supplies a dedicated endpoint, the
 lobby owner can publish it through `TSteamOnlineService.SetDedicatedServer`.

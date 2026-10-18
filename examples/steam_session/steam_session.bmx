@@ -2,6 +2,7 @@ SuperStrict
 
 Framework Max2D.SDL3RenderMax2D
 Import GameNet.SteamOnline
+Import GameNet.OnlineFlow
 Import GameNet.Session
 Import BRL.PolledInput
 
@@ -10,6 +11,7 @@ Const APP_VERSION:UInt = 1
 
 Global steamOnline:TSteamOnlineService = TSteamOnlineService.Create(2, 900, ESteamOnlineTransportKind.NetworkingSockets)
 Global online:IOnlineService = steamOnline
+Global onlineFlow:TOnlineFlowCoordinator
 Global statusText:String = "Starting Steam..."
 Global detailText:String = ""
 Global transport:INetTransport
@@ -17,16 +19,17 @@ Global session:TNetSession
 Global peers:SNetPeer[8]
 Global joinedCount:Int
 Global hostRole:Int
-Global findRequest:UInt
-Global startRequest:UInt
 Global sentCount:UInt
 Global receivedCount:UInt
 
-Function BeginSession(requestId:UInt)
-	Local info:SOnlineMatchInfo
-	If Not online.MatchInfo(requestId, info) Then statusText = "Match information unavailable"; Return
-	transport = online.TakeMatchTransport(requestId)
-	If Not transport Then statusText = "Could not take Steam transport"; Return
+Function BeginSession()
+	Local launch:TOnlineMatchLaunch = onlineFlow.TakeMatch()
+	If Not launch Or Not launch.IsValid() Then
+		statusText = "Could not take Steam transport"
+		Return
+	End If
+	Local info:SOnlineMatchInfo = launch.Info()
+	transport = launch.Transport()
 	hostRole = info.IsSessionHost()
 	If hostRole Then
 		session = TNetSession.CreateHost(transport, APP_ID, APP_VERSION, info.PlayerCount() - 1, 900)
@@ -39,41 +42,49 @@ Function BeginSession(requestId:UInt)
 End Function
 
 Function PollOnline()
-	online.Pump()
-	Local event:SOnlineEvent
-	While online.Poll(event)
+	onlineFlow.Pump()
+	Local event:SOnlineFlowEvent
+	While onlineFlow.Poll(event)
 		Select event.Kind()
-			Case EOnlineEventKind.ServiceReady
-				statusText = "Steam: " + event.Player().DisplayName()
-				detailText = "Create a lobby on one computer; find it on the other"
-			Case EOnlineEventKind.LobbyCreated
-				statusText = "Lobby created"
-				detailText = "Lobby " + event.SubjectId() + "; waiting for another player"
-			Case EOnlineEventKind.LobbySearchCompleted
-				findRequest = 0
-				If online.LobbyResultCount(event.RequestId()) Then
-					Local lobby:IOnlineLobby = online.LobbyResult(event.RequestId(), 0)
-					online.JoinLobby(lobby.Id())
-					statusText = "Joining " + lobby.Name()
-				Else
-					statusText = "No matching lobby found"
-				End If
-			Case EOnlineEventKind.LobbyJoined
-				statusText = "Lobby joined"
-				detailText = "Both players should press Start Match"
-			Case EOnlineEventKind.LobbyChanged
-				Local lobby:IOnlineLobby = online.CurrentLobby()
-				If lobby Then detailText = "Lobby players: " + lobby.MemberCount() + "/" + lobby.MaxPlayers()
-			Case EOnlineEventKind.MatchReady
-				BeginSession(event.RequestId())
-			Case EOnlineEventKind.InvitationReceived
+			Case EOnlineFlowEventKind.Ready
+				statusText = "Steam is ready"
+				detailText = "Host directly or use Quick Play on both computers"
+			Case EOnlineFlowEventKind.Searching
+				statusText = "Looking for a compatible Steam lobby"
+			Case EOnlineFlowEventKind.Creating
+				statusText = "Creating a Steam lobby"
+			Case EOnlineFlowEventKind.Joining
+				statusText = "Joining a Steam lobby"
+			Case EOnlineFlowEventKind.WaitingForPlayers
+				statusText = "Waiting in the Steam lobby"
+				detailText = "Lobby players: " + event.PlayerCount() + "/2"
+			Case EOnlineFlowEventKind.StartingMatch
+				statusText = "Starting the match"
+			Case EOnlineFlowEventKind.NoMatchFound
+				statusText = "No matching lobby found"
+			Case EOnlineFlowEventKind.MatchReady
+				BeginSession()
+			Case EOnlineFlowEventKind.InvitationReceived
 				statusText = "Lobby invitation from " + event.Player().DisplayName()
 				detailText = "Invitation lobby: " + event.SubjectId()
-			Case EOnlineEventKind.OperationFailed
+			Case EOnlineFlowEventKind.Failed
 				statusText = "Online operation failed: " + Int(event.Error())
 				detailText = event.Detail()
 		End Select
 	Wend
+End Function
+
+Function NewSteamFlowRequest:TOnlineFlowRequest(startPolicy:EOnlineFlowStartPolicy)
+	Local request:TOnlineFlowRequest = New TOnlineFlowRequest
+	request.lobbyOptions.name = "GameNet test lobby"
+	request.lobbyOptions.minPlayers = 2
+	request.lobbyOptions.maxPlayers = 2
+	request.lobbyOptions.visibility = EOnlineLobbyVisibility.Public
+	request.lobbyOptions.properties.Set("example", "gamenet-steam-session")
+	request.lobbyQuery.maximumResults = 10
+	request.lobbyQuery.properties.Set("example", "gamenet-steam-session")
+	request.startPolicy = startPolicy
+	Return request
 End Function
 
 Function PollSession()
@@ -85,7 +96,10 @@ Function PollSession()
 				session.Accept(event.Peer())
 			Case ESessionEventKind.Joined
 				Local index:Int = Int(event.Peer().Id()) - 1
-				If index >= 0 And index < peers.Length And Not peers[index].IsValid() Then peers[index] = event.Peer(); joinedCount :+ 1
+				If index >= 0 And index < peers.Length And Not peers[index].IsValid() Then
+					peers[index] = event.Peer()
+					joinedCount :+ 1
+				End If
 				statusText = "GameNet session ready"
 				detailText = "Press Send Packet"
 			Case ESessionEventKind.Message
@@ -124,7 +138,10 @@ End Function
 
 Graphics 900, 500
 SetClsColor 12, 16, 24
-If Not online Or online.Open() = 0 Then Throw "Could not open Steam online service"
+onlineFlow = TOnlineFlowCoordinator.Create(online)
+If Not onlineFlow Or Not onlineFlow.Open() Then
+	Throw "Could not open Steam online service"
+End If
 
 While Not AppTerminate()
 	PollOnline()
@@ -135,20 +152,12 @@ While Not AppTerminate()
 	DrawText statusText, 28, 90
 	DrawText detailText, 28, 125
 
-	If Button(28, 210, 250, "Create Lobby") And Not online.CurrentLobby() Then
-		Local options:TOnlineLobbyOptions = New TOnlineLobbyOptions
-		options.name = "GameNet test lobby"
-		options.maxPlayers = 2
-		options.visibility = EOnlineLobbyVisibility.Public
-		options.properties.Set("example", "gamenet-steam-session")
-		online.CreateLobby(options)
+	If Button(28, 210, 250, "Host Lobby") And onlineFlow.State() = EOnlineFlowState.Ready Then
+		onlineFlow.Host(NewSteamFlowRequest(EOnlineFlowStartPolicy.Manual))
 	End If
 
-	If Button(310, 210, 250, "Find Lobby") And Not online.CurrentLobby() And findRequest = 0 Then
-		Local query:TOnlineLobbyQuery = New TOnlineLobbyQuery
-		query.maximumResults = 10
-		query.properties.Set("example", "gamenet-steam-session")
-		findRequest = online.FindLobbies(query)
+	If Button(310, 210, 250, "Quick Play") And onlineFlow.State() = EOnlineFlowState.Ready Then
+		onlineFlow.QuickPlay(NewSteamFlowRequest(EOnlineFlowStartPolicy.WhenMinimumPlayers))
 	End If
 
 	Local action:String = "Start Match"
@@ -156,9 +165,10 @@ While Not AppTerminate()
 	If Button(592, 210, 250, action) Then
 		If joinedCount Then
 			SendPacket()
-		Else If online.CurrentLobby() And startRequest = 0 Then
-			startRequest = online.StartMatch()
-			If startRequest Then detailText = "Waiting for lobby owner to start"
+		Else If onlineFlow.State() = EOnlineFlowState.WaitingForPlayers Then
+			If onlineFlow.StartMatch() Then
+				detailText = "Waiting for the lobby owner to start"
+			End If
 		End If
 	End If
 
@@ -172,4 +182,4 @@ While Not AppTerminate()
 Wend
 
 If session Then session.Close()
-If online Then online.Close()
+If onlineFlow Then onlineFlow.Close()

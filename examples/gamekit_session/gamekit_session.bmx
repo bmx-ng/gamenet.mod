@@ -2,7 +2,7 @@ SuperStrict
 
 Framework Max2D.SDL3RenderMax2D
 Import GameNet.GameKitOnline
-Import GameNet.Online
+Import GameNet.OnlineFlow
 Import GameNet.Session
 Import BRL.PolledInput
 Import BRL.StandardIO
@@ -15,7 +15,7 @@ Const MATCH_MAX_PLAYERS:Int = 2 ' Raise both values together to test a larger fi
 Global statusText:String = "Starting online service..."
 Global detailText:String = ""
 Global online:IOnlineService = TGameKitOnlineService.Create(GAMEKIT_MAX_REMOTE_PEERS, 2, 900)
-Global matchmakingRequest:UInt
+Global onlineFlow:TOnlineFlowCoordinator
 Global transport:INetTransport
 Global session:TNetSession
 Global remotePeers:SNetPeer[GAMEKIT_MAX_REMOTE_PEERS]
@@ -24,17 +24,14 @@ Global hostRole:Int
 Global sentCount:UInt
 Global receivedCount:UInt
 
-Function BeginSession(requestId:UInt)
-	Local info:SOnlineMatchInfo
-	If Not online.MatchInfo(requestId, info) Then
-		statusText = "Match information unavailable"
-		Return
-	End If
-	transport = online.TakeMatchTransport(requestId)
-	If Not transport Then
+Function BeginSession()
+	Local launch:TOnlineMatchLaunch = onlineFlow.TakeMatch()
+	If Not launch Or Not launch.IsValid() Then
 		statusText = "Could not take online match transport"
 		Return
 	End If
+	Local info:SOnlineMatchInfo = launch.Info()
+	transport = launch.Transport()
 	hostRole = info.IsSessionHost()
 	If hostRole Then
 		session = TNetSession.CreateHost(transport, APP_ID, APP_VERSION, info.PlayerCount() - 1, 900)
@@ -44,28 +41,30 @@ Function BeginSession(requestId:UInt)
 		statusText = "Match connected; joining session host"
 	End If
 	detailText = "Online players: " + info.PlayerCount()
-	matchmakingRequest = 0
 End Function
 
 Function PollOnline()
-	If Not online Then Return
-	online.Pump()
-	Local event:SOnlineEvent
-	While online.Poll(event)
+	If Not onlineFlow Then
+		Return
+	End If
+	onlineFlow.Pump()
+	Local event:SOnlineFlowEvent
+	While onlineFlow.Poll(event)
 		Select event.Kind()
-			Case EOnlineEventKind.ServiceReady
-				statusText = "Authenticated as " + event.Player().DisplayName()
+			Case EOnlineFlowEventKind.Ready
+				statusText = "Game Center is ready"
 				detailText = "Tap Find Match on both devices"
-			Case EOnlineEventKind.MatchmakingStarted
+			Case EOnlineFlowEventKind.Matchmaking
 				statusText = "Looking for " + MATCH_MIN_PLAYERS + "-" + MATCH_MAX_PLAYERS + " players..."
-				detailText = "Online request " + event.RequestId()
-			Case EOnlineEventKind.MatchReady
-				BeginSession(event.RequestId())
-			Case EOnlineEventKind.MatchmakingCancelled
-				matchmakingRequest = 0
+				detailText = "Game Center matchmaking is active"
+			Case EOnlineFlowEventKind.WaitingForPlayers
+				statusText = "Waiting for players"
+				detailText = "Online players: " + event.PlayerCount()
+			Case EOnlineFlowEventKind.MatchReady
+				BeginSession()
+			Case EOnlineFlowEventKind.Cancelled
 				statusText = "Matchmaking cancelled"
-			Case EOnlineEventKind.OperationFailed
-				If event.Operation() = EOnlineOperation.StartMatchmaking Then matchmakingRequest = 0
+			Case EOnlineFlowEventKind.Failed
 				statusText = "Online operation failed: " + Int(event.Error())
 				detailText = event.Detail()
 		End Select
@@ -128,7 +127,10 @@ Graphics 800, 480
 SetClsColor 12, 16, 24
 SetColor 235, 240, 250
 If Not online Then Throw "GameKit online service unavailable"
-If online.Open() = 0 Then Throw "Could not open GameKit online service"
+onlineFlow = TOnlineFlowCoordinator.Create(online)
+If Not onlineFlow Or Not onlineFlow.Open() Then
+	Throw "Could not open GameKit online service"
+End If
 
 While Not AppTerminate()
 	PollOnline()
@@ -147,12 +149,13 @@ While Not AppTerminate()
 	If pressed Then
 		If joinedCount > 0 Then
 			SendPacket()
-		Else If online.State() = EOnlineServiceState.Ready And matchmakingRequest = 0 And Not session Then
-			Local request:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
-			request.minPlayers = MATCH_MIN_PLAYERS
-			request.maxPlayers = MATCH_MAX_PLAYERS
-			matchmakingRequest = online.StartMatchmaking(request)
-			If matchmakingRequest = 0 Then statusText = "Could not start matchmaking"
+		Else If onlineFlow.State() = EOnlineFlowState.Ready And Not session Then
+			Local request:TOnlineFlowRequest = New TOnlineFlowRequest
+			request.matchmakingRequest.minPlayers = MATCH_MIN_PLAYERS
+			request.matchmakingRequest.maxPlayers = MATCH_MAX_PLAYERS
+			If Not onlineFlow.QuickPlay(request) Then
+				statusText = "Could not start matchmaking"
+			End If
 		End If
 	End If
 
@@ -170,4 +173,4 @@ While Not AppTerminate()
 Wend
 
 If session Then session.Close()
-If online Then online.Close()
+If onlineFlow Then onlineFlow.Close()

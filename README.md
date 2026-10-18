@@ -165,9 +165,10 @@ joiner which discovers a compatible game, uses the returned endpoint to create
 an ENet connection, and exchanges a reliable greeting.
 
 [`examples/eos_online`](examples/eos_online) is a Max2D integration test which
-signs in two Developer Authentication Tool accounts, creates and discovers an
-EOS lobby, joins it, starts a GameNet match, and verifies reliable PING/PONG
-over the resulting EOS P2P transport.
+uses two managed `TEOSSessionCoordinator` sessions to sign in Developer
+Authentication Tool accounts, creates and discovers an EOS lobby, joins it,
+starts a GameNet match, and verifies reliable PING/PONG over the resulting EOS
+P2P transport.
 
 For application code, create the online service from the managed session after
 its `OnEOSSessionReady` event:

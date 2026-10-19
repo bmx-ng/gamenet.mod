@@ -35,6 +35,10 @@ Transport-independent building blocks for real-time multiplayer games.
   lobbies, invitations, matchmaking, and handing a connected transport to a
   game. Service adapters can target GameKit, Steam, Nakama, EOS, or future
   providers without making them dependencies of the core networking modules.
+- `GameNet.OnlineFlow` turns player-facing Host, Find and Join, Quick Play, and
+  Accept Invitation actions into the appropriate provider operations. It owns
+  asynchronous request correlation, find-join-or-create fallback, waiting for
+  players, match startup, and the one-time transport handoff.
 - `GameNet.Impairment` decorates any transport with deterministic, bounded
   latency, jitter, bandwidth, loss, duplication, and reordering simulation.
 - `GameNet.Session` adds a versioned handshake, framed application messages,
@@ -130,8 +134,9 @@ frame-numbered redundant input, bounded prediction lead, rollback over a real
 session, confirmed-state hashes, and repeatable delay and packet-loss testing.
 
 [`examples/gamekit_session`](examples/gamekit_session) programmatically
-automatches two Game Center players and validates a complete `GameNet.Session`
-handshake and message exchange over `GKMatch` on Apple devices.
+uses `GameNet.OnlineFlow` to automatch two Game Center players, then validates
+a complete `GameNet.Session` handshake and message exchange over `GKMatch` on
+Apple devices.
 
 [`examples/gamekit_rebound`](examples/gamekit_rebound) turns the same GameKit
 matchmaking into a playable two-player fixed-point rollback game with touch and
@@ -169,6 +174,10 @@ uses two managed `TEOSSessionCoordinator` sessions to sign in Developer
 Authentication Tool accounts, creates and discovers an EOS lobby, joins it,
 starts a GameNet match, and verifies reliable PING/PONG over the resulting EOS
 P2P transport.
+
+[`examples/steam_session`](examples/steam_session) uses the same online-flow
+coordinator for explicit hosting and find-join-or-create Quick Play. It then
+hands the resulting Steam Networking Sockets transport to `GameNet.Session`.
 
 For application code, create the online service from the managed session after
 its `OnEOSSessionReady` event:

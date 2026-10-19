@@ -13,11 +13,12 @@ Module GameNet.Nakama
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 ModuleInfo "History: 0.1 Initial Nakama matchmaking and match transport"
+ModuleInfo "History: 0.2 Added a testable backend boundary and hardened session identity handling"
 
 Import GameNet.Online
 Import Nakama.SDK
@@ -71,10 +72,75 @@ End Type
 
 Public
 
+Rem
+bbdoc: Nakama operations consumed by #TNakamaOnlineService and #TNakamaTransport.
+about: Applications normally use the built-in SDK implementation. This
+boundary is public so provider behavior can be tested without a live server.
+End Rem
+Interface INakamaOnlineBackend
+	Method Pump()
+	Method AuthenticateDevice:Int(deviceId:String, username:String, create:Int)
+	Method AuthenticationState:Int()
+	Method ErrorCode:Int()
+	Method ErrorMessage:String()
+	Method UserId:String()
+	Method Username:String()
+	Method ConnectSocket:Int()
+	Method AddMatchmaker:Int(minCount:Int, maxCount:Int)
+	Method CancelMatchmaker:Int()
+	Method MatchSelfSessionId:String()
+	Method MatchPlayerCount:Int()
+	Method MatchPlayer:SNakamaMatchPlayer(index:Int)
+	Method SendMatchDataBytes:Int(opCode:Long, data:Byte Ptr, length:Size_T, targetSessionId:String)
+	Method LeaveMatch:Int()
+	Method DisconnectSocket()
+	Method Poll:Int(event:SNakamaEvent Var)
+	Method DroppedEvents:ULong()
+	Method Shutdown()
+End Interface
+
+Private
+
+Type TNativeNakamaOnlineBackend Implements INakamaOnlineBackend
+	Field client:TNakamaClient
+
+	Method New(client:TNakamaClient)
+		Self.client = client
+	End Method
+
+	Method Pump() Override If client Then client.Tick() End Method
+	Method AuthenticateDevice:Int(deviceId:String, username:String, create:Int) Override Return client And client.AuthenticateDevice(deviceId, username, create) End Method
+	Method AuthenticationState:Int() Override If client Then Return client.AuthenticationState() Else Return NAKAMA_AUTHENTICATION_FAILED End Method
+	Method ErrorCode:Int() Override If client Then Return client.ErrorCode() Else Return -1 End Method
+	Method ErrorMessage:String() Override If client Then Return client.ErrorMessage() Else Return "Invalid Nakama client." End Method
+	Method UserId:String() Override If client Then Return client.UserId() Else Return "" End Method
+	Method Username:String() Override If client Then Return client.Username() Else Return "" End Method
+	Method ConnectSocket:Int() Override If client Then Return client.ConnectSocket() Else Return False End Method
+	Method AddMatchmaker:Int(minCount:Int, maxCount:Int) Override If client Then Return client.AddMatchmaker(minCount, maxCount) Else Return False End Method
+	Method CancelMatchmaker:Int() Override If client Then Return client.CancelMatchmaker() Else Return False End Method
+	Method MatchSelfSessionId:String() Override If client Then Return client.MatchSelfSessionId() Else Return "" End Method
+	Method MatchPlayerCount:Int() Override If client Then Return client.MatchPlayerCount() Else Return 0 End Method
+	Method MatchPlayer:SNakamaMatchPlayer(index:Int) Override If client Then Return client.MatchPlayer(index) Else Return New SNakamaMatchPlayer End Method
+	Method SendMatchDataBytes:Int(opCode:Long, data:Byte Ptr, length:Size_T, targetSessionId:String) Override If client Then Return client.SendMatchDataBytes(opCode, data, length, targetSessionId) Else Return False End Method
+	Method LeaveMatch:Int() Override If client Then Return client.LeaveMatch() Else Return False End Method
+	Method DisconnectSocket() Override If client Then client.DisconnectSocket() End Method
+	Method Poll:Int(event:SNakamaEvent Var) Override
+		If client Then Return client.Poll(event)
+		event = New SNakamaEvent
+		Return False
+	End Method
+	Method DroppedEvents:ULong() Override If client Then Return client.DroppedEvents() Else Return 0 End Method
+	Method Shutdown() Override
+		If client Then client.Free(); client = Null
+	End Method
+End Type
+
+Public
+
 ' Shared internally by the online-service and handed-off transport lifetimes.
 Type TNakamaSharedContext
 	Private
-	Field client:TNakamaClient
+	Field backend:INakamaOnlineBackend
 	Field serviceEvents:TNakamaNativeEventQueue = New TNakamaNativeEventQueue(NAKAMA_TRANSPORT_EVENT_CAPACITY)
 	Field transportEvents:TNakamaNativeEventQueue = New TNakamaNativeEventQueue(NAKAMA_TRANSPORT_EVENT_CAPACITY)
 	Field serviceAttached:Int = True
@@ -83,12 +149,12 @@ Type TNakamaSharedContext
 	Field closed:Int
 
 	Public
-	Method New(client:TNakamaClient)
-		Self.client = client
+	Method New(backend:INakamaOnlineBackend)
+		Self.backend = backend
 	End Method
 
-	Method Client:TNakamaClient()
-		Return client
+	Method Backend:INakamaOnlineBackend()
+		Return backend
 	End Method
 
 	Method PollService:Int(event:SNakamaEvent Var)
@@ -99,12 +165,24 @@ Type TNakamaSharedContext
 		Return transportEvents.Poll(event)
 	End Method
 
+	Method DroppedServiceEvents:ULong()
+		Local result:ULong = ULong(serviceEvents.dropped)
+		If backend Then result :+ backend.DroppedEvents()
+		Return result
+	End Method
+
+	Method DroppedTransportEvents:ULong()
+		Local result:ULong = ULong(transportEvents.dropped)
+		If backend Then result :+ backend.DroppedEvents()
+		Return result
+	End Method
+
 	Method Pump()
-		If closed Or pumping Or Not client Then Return
+		If closed Or pumping Or Not backend Then Return
 		pumping = True
-		client.Tick()
+		backend.Pump()
 		Local event:SNakamaEvent
-		While client.Poll(event)
+		While backend.Poll(event)
 			Select event.kind
 				Case ENakamaEventKind.MatchData, ENakamaEventKind.MatchPresenceJoined, ENakamaEventKind.MatchPresenceLeft, ENakamaEventKind.MatchLeft
 					If transportAttached Then transportEvents.Push(event)
@@ -128,7 +206,7 @@ Type TNakamaSharedContext
 	End Method
 
 	Method ReleaseTransport()
-		If transportAttached And client Then client.LeaveMatch()
+		If transportAttached And backend Then backend.LeaveMatch()
 		transportAttached = False
 		ShutdownIfUnused()
 	End Method
@@ -136,10 +214,10 @@ Type TNakamaSharedContext
 	Method ShutdownIfUnused()
 		If closed Or serviceAttached Or transportAttached Then Return
 		closed = True
-		If client Then
-			client.DisconnectSocket()
-			client.Free()
-			client = Null
+		If backend Then
+			backend.DisconnectSocket()
+			backend.Shutdown()
+			backend = Null
 		End If
 	End Method
 End Type
@@ -177,17 +255,18 @@ Type TNakamaTransport Implements INetTransport
 	Field _eventRead:Int
 	Field _eventWrite:Int
 	Field _eventCount:Int
+	Field _droppedEvents:ULong
 	Field _open:Int = True
 
 	Public
-	Method New(context:TNakamaSharedContext, players:SNakamaMatchPlayer[], localUserId:String, channelCount:Int, maxPacketSize:Size_T)
+	Method New(context:TNakamaSharedContext, players:SNakamaMatchPlayer[], localSessionId:String, channelCount:Int, maxPacketSize:Size_T)
 		_context = context
 		_channelCount = channelCount
 		_maxPacketSize = maxPacketSize
 		_sendBuffer = New Byte[Int(maxPacketSize + NAKAMA_FRAME_HEADER_SIZE)]
 		_receiveBuffer = New Byte[Int(maxPacketSize)]
 		For Local player:SNakamaMatchPlayer = EachIn players
-			If player.sessionId And player.userId <> localUserId Then AddPeer(player)
+			If player.sessionId And player.sessionId <> localSessionId Then AddPeer(player)
 		Next
 		SortPeers()
 		_sendSequence = New UInt[channelCount]
@@ -222,7 +301,7 @@ Type TNakamaTransport Implements INetTransport
 	End Method
 
 	Method Queue(event:SNetEvent)
-		If _eventCount = _events.Length Then Return
+		If _eventCount = _events.Length Then _droppedEvents :+ 1; Return
 		_events[_eventWrite] = event
 		_eventWrite = (_eventWrite + 1) Mod _events.Length
 		_eventCount :+ 1
@@ -325,7 +404,7 @@ Type TNakamaTransport Implements INetTransport
 	End Method
 
 	Method Send:ETransportResult(peer:SNetPeer, channel:UInt, delivery:EDeliveryMode, data:Byte Ptr, length:Size_T) Override
-		If Not _open Or Not _context Or Not _context.Client() Then Return ETransportResult.Closed
+		If Not _open Or Not _context Or Not _context.Backend() Then Return ETransportResult.Closed
 		Local peerIndex:Int = PeerIndex(peer)
 		If peerIndex < 0 Or Not _peers[peerIndex].active Then Return ETransportResult.InvalidPeer
 		If channel >= UInt(_channelCount) Then Return ETransportResult.InvalidChannel
@@ -336,23 +415,28 @@ Type TNakamaTransport Implements INetTransport
 		Local writer:SPacketWriter = New SPacketWriter(Byte Ptr(_sendBuffer), Size_T(_sendBuffer.Length))
 		writer.WriteUInt32(NAKAMA_FRAME_MAGIC); writer.WriteUInt8(NAKAMA_FRAME_VERSION); writer.WriteUInt8(UInt(delivery)); writer.WriteUInt16(channel); writer.WriteUInt32(sequence); writer.WriteBytes(data, length)
 		If writer.Failed() Then Return ETransportResult.PacketTooLarge
-		If Not _context.Client().SendMatchDataBytes(NAKAMA_GAMENET_OPCODE, Byte Ptr(_sendBuffer), writer.Position(), _peers[peerIndex].sessionId) Then Return ETransportResult.Failed
+		If Not _context.Backend().SendMatchDataBytes(NAKAMA_GAMENET_OPCODE, Byte Ptr(_sendBuffer), writer.Position(), _peers[peerIndex].sessionId) Then Return ETransportResult.Failed
 		Return ETransportResult.Ok
 	End Method
 
 	Method Disconnect:ETransportResult(peer:SNetPeer, code:Int = 0) Override
-		If Not _open Or Not _context Or Not _context.Client() Then Return ETransportResult.Closed
+		If Not _open Or Not _context Or Not _context.Backend() Then Return ETransportResult.Closed
 		Local peerIndex:Int = PeerIndex(peer)
 		If peerIndex < 0 Or Not _peers[peerIndex].active Then Return ETransportResult.InvalidPeer
 		Local writer:SPacketWriter = New SPacketWriter(Byte Ptr(_sendBuffer), Size_T(_sendBuffer.Length))
 		writer.WriteUInt32(NAKAMA_FRAME_MAGIC); writer.WriteUInt8(NAKAMA_FRAME_VERSION); writer.WriteUInt8(NAKAMA_CONTROL_DELIVERY); writer.WriteUInt16(0); writer.WriteUInt32(0); writer.WriteUInt32(UInt(code))
-		If Not _context.Client().SendMatchDataBytes(NAKAMA_GAMENET_OPCODE, Byte Ptr(_sendBuffer), writer.Position(), _peers[peerIndex].sessionId) Then Return ETransportResult.Failed
+		If Not _context.Backend().SendMatchDataBytes(NAKAMA_GAMENET_OPCODE, Byte Ptr(_sendBuffer), writer.Position(), _peers[peerIndex].sessionId) Then Return ETransportResult.Failed
 		Deactivate(peerIndex, code)
 		Return ETransportResult.Ok
 	End Method
 
 	Method MaxPacketSize:Size_T(delivery:EDeliveryMode) Override Return _maxPacketSize End Method
 	Method IsOpen:Int() Override Return _open Or _eventCount > 0 End Method
+	Method DroppedEvents:ULong()
+		Local result:ULong = _droppedEvents
+		If _context Then result :+ _context.DroppedTransportEvents()
+		Return result
+	End Method
 
 	Method Close() Override
 		If Not _open And Not _context Then Return
@@ -387,14 +471,15 @@ Type TNakamaOnlineService Implements IOnlineService
 	Field _eventRead:Int
 	Field _eventWrite:Int
 	Field _eventCount:Int
+	Field _droppedEvents:ULong
 	Field _readyRequestId:UInt
 	Field _readyTransport:INetTransport
 	Field _readyInfo:SOnlineMatchInfo
 	Field _channelCount:Int
 	Field _maxPacketSize:Size_T
 
-	Method New(client:TNakamaClient, deviceId:String, username:String, channelCount:Int, maxPacketSize:Size_T)
-		_context = New TNakamaSharedContext(client)
+	Method New(backend:INakamaOnlineBackend, deviceId:String, username:String, channelCount:Int, maxPacketSize:Size_T)
+		_context = New TNakamaSharedContext(backend)
 		_deviceId = deviceId; _requestedUsername = username
 		_channelCount = channelCount; _maxPacketSize = maxPacketSize
 	End Method
@@ -405,28 +490,32 @@ Type TNakamaOnlineService Implements IOnlineService
 	End Method
 
 	Method Queue(event:SOnlineEvent)
-		If _eventCount = _events.Length Then Return
+		If _eventCount = _events.Length Then _droppedEvents :+ 1; Return
 		_events[_eventWrite] = event; _eventWrite = (_eventWrite + 1) Mod _events.Length; _eventCount :+ 1
 	End Method
 
-	Method Failure(operation:EOnlineOperation, requestId:UInt, code:Int, detail:String)
-		Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, EOnlineError.ProviderFailure, code, "", New SOnlinePlayer, detail))
+	Method Failure(operation:EOnlineOperation, requestId:UInt, code:Int, detail:String, error:EOnlineError = EOnlineError.ProviderFailure)
+		Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, error, code, "", New SOnlinePlayer, detail))
 	End Method
 
 	Method PrepareMatch(matchId:String)
-		Local count:Int = _context.Client().MatchPlayerCount()
+		Local count:Int = _context.Backend().MatchPlayerCount()
 		If count < 1 Then Failure(EOnlineOperation.StartMatchmaking, _matchmakingRequestId, 0, "Nakama returned an empty match roster"); _matchmakingRequestId = 0; Return
 		Local players:SNakamaMatchPlayer[] = New SNakamaMatchPlayer[count]
-		Local localUserId:String = _context.Client().UserId()
-		Local localSessionId:String
+		Local localSessionId:String = _context.Backend().MatchSelfSessionId()
 		Local hostSessionId:String
+		Local localSessionFound:Int
 		For Local index:Int = 0 Until count
-			players[index] = _context.Client().MatchPlayer(index)
-			If players[index].userId = localUserId Then localSessionId = players[index].sessionId
+			players[index] = _context.Backend().MatchPlayer(index)
+			If Not players[index].sessionId Then Failure(EOnlineOperation.StartMatchmaking, _matchmakingRequestId, 0, "Nakama match roster contains an empty session id"); _matchmakingRequestId = 0; Return
+			For Local previous:Int = 0 Until index
+				If players[previous].sessionId = players[index].sessionId Then Failure(EOnlineOperation.StartMatchmaking, _matchmakingRequestId, 0, "Nakama match roster contains a duplicate session id"); _matchmakingRequestId = 0; Return
+			Next
+			If players[index].sessionId = localSessionId Then localSessionFound = True
 			If Not hostSessionId Or players[index].sessionId.Compare(hostSessionId) < 0 Then hostSessionId = players[index].sessionId
 		Next
-		If Not localSessionId Or Not hostSessionId Then Failure(EOnlineOperation.StartMatchmaking, _matchmakingRequestId, 0, "Nakama match roster has no local session"); _matchmakingRequestId = 0; Return
-		Local transport:TNakamaTransport = New TNakamaTransport(_context, players, localUserId, _channelCount, _maxPacketSize)
+		If Not localSessionId Or Not localSessionFound Or Not hostSessionId Then Failure(EOnlineOperation.StartMatchmaking, _matchmakingRequestId, 0, "Nakama match roster has no local session"); _matchmakingRequestId = 0; Return
+		Local transport:TNakamaTransport = New TNakamaTransport(_context, players, localSessionId, _channelCount, _maxPacketSize)
 		Local host:Int = localSessionId = hostSessionId
 		Local hostPeer:SNetPeer
 		If Not host Then hostPeer = transport.PeerForSession(hostSessionId)
@@ -440,22 +529,27 @@ Type TNakamaOnlineService Implements IOnlineService
 		If Not host Or port < 1 Or port > 65535 Or Not serverKey Or Not deviceId Or timeoutMs < 1 Or channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Or maxPacketSize > Size_T($7FFFFFFF) - NAKAMA_FRAME_HEADER_SIZE Then Return Null
 		Local client:TNakamaClient = TNakamaClient.Create(host, port, serverKey, useSSL, timeoutMs)
 		If Not client Then Return Null
-		Return New TNakamaOnlineService(client, deviceId, username, channelCount, maxPacketSize)
+		Return New TNakamaOnlineService(New TNativeNakamaOnlineBackend(client), deviceId, username, channelCount, maxPacketSize)
+	End Function
+
+	Function CreateForBackend:TNakamaOnlineService(backend:INakamaOnlineBackend, deviceId:String = "test-device", username:String = "", channelCount:Int = 4, maxPacketSize:Size_T = NAKAMA_DEFAULT_MAX_PACKET_SIZE)
+		If Not backend Or Not deviceId Or channelCount < 1 Or channelCount > 65536 Or maxPacketSize < 1 Or maxPacketSize > Size_T($7FFFFFFF) - NAKAMA_FRAME_HEADER_SIZE Then Return Null
+		Return New TNakamaOnlineService(backend, deviceId, username, channelCount, maxPacketSize)
 	End Function
 
 	Method ProviderName:String() Override Return "Nakama" End Method
 	Method Capabilities:EOnlineCapability() Override Return EOnlineCapability.Matchmaking | EOnlineCapability.MatchTransport End Method
 	Method State:EOnlineServiceState() Override Return _state End Method
 	Method LocalPlayer:SOnlinePlayer() Override
-		If _state <> EOnlineServiceState.Ready Or Not _context Or Not _context.Client() Then Return New SOnlinePlayer
-		Return New SOnlinePlayer(_context.Client().UserId(), _context.Client().Username(), True)
+		If _state <> EOnlineServiceState.Ready Or Not _context Or Not _context.Backend() Then Return New SOnlinePlayer
+		Return New SOnlinePlayer(_context.Backend().UserId(), _context.Backend().Username(), True)
 	End Method
 
 	Method Open:UInt() Override
-		If _state <> EOnlineServiceState.Closed Or Not _context Or Not _context.Client() Then Return 0
+		If _state <> EOnlineServiceState.Closed Or Not _context Or Not _context.Backend() Then Return 0
 		_openRequestId = NextRequestId(); _state = EOnlineServiceState.Opening
-		If Not _context.Client().AuthenticateDevice(_deviceId, _requestedUsername, True) Then
-			_state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, _context.Client().ErrorCode(), _context.Client().ErrorMessage())
+		If Not _context.Backend().AuthenticateDevice(_deviceId, _requestedUsername, True) Then
+			_state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, _context.Backend().ErrorCode(), _context.Backend().ErrorMessage(), EOnlineError.Authentication)
 		End If
 		Return _openRequestId
 	End Method
@@ -463,15 +557,15 @@ Type TNakamaOnlineService Implements IOnlineService
 	Method Pump() Override
 		If _state = EOnlineServiceState.Closed Or Not _context Then Return
 		_context.Pump()
-		If _state = EOnlineServiceState.Opening And _context.Client() Then
-			Select _context.Client().AuthenticationState()
+		If _state = EOnlineServiceState.Opening And _context.Backend() Then
+			Select _context.Backend().AuthenticationState()
 				Case NAKAMA_AUTHENTICATION_SUCCEEDED
 					If Not _connectStarted Then
 						_connectStarted = True
-						If Not _context.Client().ConnectSocket() Then _state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, _context.Client().ErrorCode(), _context.Client().ErrorMessage())
+						If Not _context.Backend().ConnectSocket() Then _state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, _context.Backend().ErrorCode(), _context.Backend().ErrorMessage(), EOnlineError.Network)
 					End If
 				Case NAKAMA_AUTHENTICATION_FAILED
-					_state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, _context.Client().ErrorCode(), _context.Client().ErrorMessage())
+					_state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, _context.Backend().ErrorCode(), _context.Backend().ErrorMessage(), EOnlineError.Authentication)
 			End Select
 		End If
 		Local event:SNakamaEvent
@@ -484,9 +578,17 @@ Type TNakamaOnlineService Implements IOnlineService
 				Case ENakamaEventKind.MatchmakingCancelled
 					If _matchmakingRequestId Then Local id:UInt = _matchmakingRequestId; _matchmakingRequestId = 0; Queue(New SOnlineEvent(EOnlineEventKind.MatchmakingCancelled, EOnlineOperation.CancelMatchmaking, id, EOnlineError.Cancelled, 0, "", New SOnlinePlayer, ""))
 				Case ENakamaEventKind.Error
-					If _state = EOnlineServiceState.Opening Then _state = EOnlineServiceState.Failed; Failure(EOnlineOperation.Open, _openRequestId, event.code, event.subject) Else If _matchmakingRequestId Then Local id:UInt = _matchmakingRequestId; _matchmakingRequestId = 0; Failure(EOnlineOperation.StartMatchmaking, id, event.code, event.subject)
+					If _state = EOnlineServiceState.Opening Then
+						_state = EOnlineServiceState.Failed
+						Failure(EOnlineOperation.Open, _openRequestId, event.code, event.subject, EOnlineError.Network)
+					Else If _matchmakingRequestId Then
+						Local id:UInt = _matchmakingRequestId; _matchmakingRequestId = 0
+						Failure(EOnlineOperation.StartMatchmaking, id, event.code, event.subject)
+					Else
+						Failure(EOnlineOperation.None, 0, event.code, event.subject)
+					End If
 				Case ENakamaEventKind.SocketDisconnected
-					If _state <> EOnlineServiceState.Closing Then _state = EOnlineServiceState.Failed; Failure(EOnlineOperation.None, 0, event.code, "Nakama realtime socket disconnected")
+					If _state <> EOnlineServiceState.Closing Then _state = EOnlineServiceState.Failed; Failure(EOnlineOperation.None, 0, event.code, "Nakama realtime socket disconnected", EOnlineError.Network)
 			End Select
 		Wend
 	End Method
@@ -496,6 +598,12 @@ Type TNakamaOnlineService Implements IOnlineService
 		event = _events[_eventRead]; _events[_eventRead] = New SOnlineEvent
 		_eventRead = (_eventRead + 1) Mod _events.Length; _eventCount :- 1
 		Return True
+	End Method
+
+	Method DroppedEvents:ULong()
+		Local result:ULong = _droppedEvents
+		If _context Then result :+ _context.DroppedServiceEvents()
+		Return result
 	End Method
 
 	Method CreateLobby:UInt(options:TOnlineLobbyOptions) Override Return 0 End Method
@@ -510,14 +618,14 @@ Type TNakamaOnlineService Implements IOnlineService
 	Method StartMatchmaking:UInt(request:TOnlineMatchmakingRequest) Override
 		If _state <> EOnlineServiceState.Ready Or Not request Or _matchmakingRequestId Or _readyTransport Or request.minPlayers < 2 Or request.maxPlayers < request.minPlayers Then Return 0
 		_matchmakingRequestId = NextRequestId()
-		If Not _context.Client().AddMatchmaker(request.minPlayers, request.maxPlayers) Then _matchmakingRequestId = 0; Return 0
+		If Not _context.Backend().AddMatchmaker(request.minPlayers, request.maxPlayers) Then _matchmakingRequestId = 0; Return 0
 		Queue(New SOnlineEvent(EOnlineEventKind.MatchmakingStarted, EOnlineOperation.StartMatchmaking, _matchmakingRequestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))
 		Return _matchmakingRequestId
 	End Method
 
 	Method CancelOperation:Int(requestId:UInt) Override
 		If requestId = 0 Or requestId <> _matchmakingRequestId Then Return False
-		Return _context.Client().CancelMatchmaker()
+		Return _context.Backend().CancelMatchmaker()
 	End Method
 
 	Method CancelMatchmaking:UInt(requestId:UInt) Override

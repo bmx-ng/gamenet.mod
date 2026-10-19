@@ -62,3 +62,6 @@ service may be closed independently.
 The module has deterministic provider tests in `tests/test.bmx`. The Nakama
 repository's `test-server/run-integration.sh` additionally starts a disposable
 local server and runs a complete two-client `TNetSession` exchange.
+
+The current validation matrix covers native macOS arm64 and Windows MinGW x64.
+Linux, macOS x64, and TLS/WSS integration have not yet been release-tested.

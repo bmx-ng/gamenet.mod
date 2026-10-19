@@ -25,12 +25,13 @@ Module GameNet.Online
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
 ModuleInfo "History: 0.1 Initial online service contract"
+ModuleInfo "History: 0.2 Added generic asynchronous operation cancellation"
 
 Import GameNet.Core
 Import BRL.Blitz
@@ -414,6 +415,15 @@ Interface IOnlineService
 	Method LeaveLobby:UInt()
 	Method AcceptInvitation:UInt(invitationId:String)
 	Method StartMatchmaking:UInt(request:TOnlineMatchmakingRequest)
+	Rem
+	bbdoc: Requests cancellation of an in-flight operation.
+	about: True means cancellation was accepted, not that it has completed. The
+	original request remains active until #Poll reports either OperationFailed
+	with Cancelled, or MatchmakingCancelled for native matchmaking. Providers
+	that cannot stop an already submitted native operation must suppress its
+	normal success and undo any state it created before reporting cancellation.
+	End Rem
+	Method CancelOperation:Int(requestId:UInt)
 	Method CancelMatchmaking:UInt(requestId:UInt)
 	Method StartMatch:UInt()
 	Method MatchInfo:Int(requestId:UInt, info:SOnlineMatchInfo Var)

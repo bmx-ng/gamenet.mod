@@ -13,10 +13,11 @@ Module GameNet.EOSOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.2"
+ModuleInfo "Version: 0.3"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
+ModuleInfo "History: 0.3 Added compensated cancellation for lobby operations"
 ModuleInfo "History: 0.1 Initial EOS lobby and P2P match provider"
 ModuleInfo "History: 0.2 Added managed EOS session integration"
 
@@ -517,11 +518,17 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Field _droppedEvents:UInt
 	Field _openRequestId:UInt
 	Field _createRequestId:UInt
+	Field _cancelCreateRequestId:UInt
 	Field _findRequestId:UInt
+	Field _cancelFindRequestId:UInt
 	Field _findResultsRequestId:UInt
 	Field _findResults:IOnlineLobby[] = New IOnlineLobby[0]
 	Field _joinRequestId:UInt
 	Field _joinOperation:EOnlineOperation
+	Field _cancelJoinRequestId:UInt
+	Field _cancelCleanupRequestId:UInt
+	Field _cancelCleanupOperation:EOnlineOperation
+	Field _cancelCleanupLobbyId:String
 	Field _leaveRequestId:UInt
 	Field _closeRequestId:UInt
 	Field _startRequestId:UInt
@@ -552,6 +559,23 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 		_events[_eventWrite] = event
 		_eventWrite = (_eventWrite + 1) Mod _events.Length
 		_eventCount :+ 1
+	End Method
+
+	Method QueueCancelled(operation:EOnlineOperation, requestId:UInt, subjectId:String = "")
+		Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, EOnlineError.Cancelled, 0, subjectId, New SOnlinePlayer, "Operation cancelled"))
+	End Method
+
+	Method BeginCancelledLobbyCleanup(operation:EOnlineOperation, requestId:UInt, snapshot:TEOSOnlineLobbySnapshot)
+		_cancelCleanupRequestId = requestId
+		_cancelCleanupOperation = operation
+		_cancelCleanupLobbyId = snapshot.LobbyId
+		Local owner:Int = snapshot.OwnerId = _backend.LocalUserId()
+		If Not _backend.LeaveLobby(snapshot.LobbyId, owner) Then
+			_cancelCleanupRequestId = 0
+			_cancelCleanupOperation = EOnlineOperation.None
+			_cancelCleanupLobbyId = ""
+			Failure(operation, requestId, EEOSResult.ServiceFailure, snapshot.LobbyId, "EOS could not clean up the cancelled lobby operation")
+		End If
 	End Method
 
 	Method Player:SOnlinePlayer(id:String)
@@ -796,6 +820,25 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Method StartMatchmaking:UInt(request:TOnlineMatchmakingRequest) Override Return 0 End Method
 	Method CancelMatchmaking:UInt(requestId:UInt) Override Return 0 End Method
 
+	Method CancelOperation:Int(requestId:UInt) Override
+		If requestId = 0 Or _cancelCleanupRequestId Then
+			Return False
+		End If
+		If requestId = _createRequestId And _cancelCreateRequestId = 0 Then
+			_cancelCreateRequestId = requestId
+			Return True
+		End If
+		If requestId = _findRequestId And _cancelFindRequestId = 0 Then
+			_cancelFindRequestId = requestId
+			Return True
+		End If
+		If requestId = _joinRequestId And _cancelJoinRequestId = 0 Then
+			_cancelJoinRequestId = requestId
+			Return True
+		End If
+		Return False
+	End Method
+
 	Method StartMatch:UInt() Override
 		If Not _current Or _startRequestId Or _readyTransport Or _current.MemberCount() < 2 Then Return 0
 		_startRequestId = NextRequestId()
@@ -841,6 +884,15 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 
 	Method OnEOSOnlineLobbyCreated(result:EEOSResult, snapshot:TEOSOnlineLobbySnapshot) Override
 		Local id:UInt = _createRequestId; _createRequestId = 0
+		If id And id = _cancelCreateRequestId Then
+			_cancelCreateRequestId = 0
+			If result = EEOSResult.Success And snapshot Then
+				BeginCancelledLobbyCleanup(EOnlineOperation.CreateLobby, id, snapshot)
+			Else
+				QueueCancelled(EOnlineOperation.CreateLobby, id)
+			End If
+			Return
+		End If
 		If result <> EEOSResult.Success Or Not snapshot Then Failure(EOnlineOperation.CreateLobby, id, result, "", "EOS could not create the lobby"); Return
 		_current = Lobby(snapshot)
 		Queue(New SOnlineEvent(EOnlineEventKind.LobbyCreated, EOnlineOperation.CreateLobby, id, EOnlineError.None, 0, snapshot.LobbyId, New SOnlinePlayer, ""))
@@ -848,6 +900,13 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 
 	Method OnEOSOnlineLobbySearch(result:EEOSResult, results:TEOSOnlineLobbyResults) Override
 		Local id:UInt = _findRequestId; _findRequestId = 0
+		If id And id = _cancelFindRequestId Then
+			_cancelFindRequestId = 0
+			_findResults = New IOnlineLobby[0]
+			_findResultsRequestId = 0
+			QueueCancelled(EOnlineOperation.FindLobbies, id)
+			Return
+		End If
 		If result <> EEOSResult.Success Then Failure(EOnlineOperation.FindLobbies, id, result, "", "EOS lobby search failed"); Return
 		Local snapshots:TEOSOnlineLobbySnapshot[] = results.Snapshots
 		_findResults = New IOnlineLobby[snapshots.Length]
@@ -859,6 +918,15 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Method OnEOSOnlineLobbyJoined(result:EEOSResult, snapshot:TEOSOnlineLobbySnapshot) Override
 		Local id:UInt = _joinRequestId; Local operation:EOnlineOperation = _joinOperation
 		_joinRequestId = 0; _joinOperation = EOnlineOperation.None
+		If id And id = _cancelJoinRequestId Then
+			_cancelJoinRequestId = 0
+			If result = EEOSResult.Success And snapshot Then
+				BeginCancelledLobbyCleanup(operation, id, snapshot)
+			Else
+				QueueCancelled(operation, id)
+			End If
+			Return
+		End If
 		If result <> EEOSResult.Success Or Not snapshot Then Failure(operation, id, result, "", "EOS rejected the lobby join"); Return
 		_current = Lobby(snapshot)
 		Queue(New SOnlineEvent(EOnlineEventKind.LobbyJoined, operation, id, EOnlineError.None, 0, snapshot.LobbyId, New SOnlinePlayer, ""))
@@ -867,6 +935,20 @@ Type TEOSOnlineService Implements IOnlineService, IEOSOnlineBackendListener
 	Method OnEOSOnlineLobbyLeft(result:EEOSResult, lobbyId:String) Override
 		If _state = EOnlineServiceState.Closing Then
 			FinishClose()
+			Return
+		End If
+		If _cancelCleanupRequestId Then
+			Local id:UInt = _cancelCleanupRequestId
+			Local operation:EOnlineOperation = _cancelCleanupOperation
+			Local subjectId:String = _cancelCleanupLobbyId
+			_cancelCleanupRequestId = 0
+			_cancelCleanupOperation = EOnlineOperation.None
+			_cancelCleanupLobbyId = ""
+			If result <> EEOSResult.Success Then
+				Failure(operation, id, result, subjectId, "EOS could not clean up the cancelled lobby operation")
+				Return
+			End If
+			QueueCancelled(operation, id, subjectId)
 			Return
 		End If
 		Local id:UInt = _leaveRequestId; _leaveRequestId = 0

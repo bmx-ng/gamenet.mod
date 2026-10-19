@@ -7,6 +7,7 @@ The initial capability set is deliberately narrow:
 
 - device authentication and realtime socket setup;
 - native Nakama matchmaking and cancellation;
+- exact-match string properties from `TOnlineMatchmakingRequest.properties`;
 - deterministic GameNet host selection from Nakama session IDs;
 - directed match data with GameNet channels and delivery metadata;
 - transport ownership which can outlive the online-service object.
@@ -20,6 +21,17 @@ Lobby discovery, invitations, parties, RPC, storage, chat and authoritative
 server features are not advertised by this adapter. Applications can use
 `Nakama.SDK` directly for Nakama facilities outside GameNet's matchmaking and
 transport contracts.
+
+Matchmaking property keys may contain ASCII letters, digits, `_`, and `-`.
+Each property is submitted as a Nakama string property and converted into a
+mandatory exact-match query. Query metacharacters and spaces in values are
+escaped automatically.
+
+An unexpected realtime socket loss is terminal for the current adapter and
+any handed-off transport: the service reports a `Network` failure and the
+transport disconnects its active peers. A game should return to its online
+flow and create a fresh service/match rather than attempting to reuse the old
+Nakama match. Transparent match restoration is not currently advertised.
 
 ## Basic flow
 

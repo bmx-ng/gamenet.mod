@@ -13,12 +13,13 @@ Module GameNet.Nakama
 
 ?bmxng2
 
-ModuleInfo "Version: 0.2"
+ModuleInfo "Version: 0.3"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 ModuleInfo "History: 0.1 Initial Nakama matchmaking and match transport"
 ModuleInfo "History: 0.2 Added a testable backend boundary and hardened session identity handling"
+ModuleInfo "History: 0.3 Added exact-match Nakama matchmaking properties"
 
 Import GameNet.Online
 Import Nakama.SDK
@@ -41,6 +42,29 @@ Enum ENakamaTransportError:Int
 End Enum
 
 Private
+
+Function NakamaMatchmakerPropertyKeyValid:Int(key:String)
+	If Not key Or key.Length > 64 Then Return False
+	For Local index:Int = 0 Until key.Length
+		Local value:Int = key[index]
+		If (value >= 48 And value <= 57) Or (value >= 65 And value <= 90) Or (value >= 97 And value <= 122) Or value = 95 Or value = 45 Then Continue
+		Return False
+	Next
+	Return True
+End Function
+
+Function NakamaMatchmakerEscape:String(value:String)
+	Local result:String
+	For Local index:Int = 0 Until value.Length
+		Local character:Int = value[index]
+		Select character
+			Case 32, 33, 34, 38, 40, 41, 42, 43, 45, 47, 58, 60, 61, 62, 63, 91, 92, 93, 94, 123, 124, 125, 126
+				result :+ Chr(92)
+		End Select
+		result :+ Chr(character)
+	Next
+	Return result
+End Function
 
 Type TNakamaNativeEventQueue
 	Field events:SNakamaEvent[]
@@ -86,7 +110,7 @@ Interface INakamaOnlineBackend
 	Method UserId:String()
 	Method Username:String()
 	Method ConnectSocket:Int()
-	Method AddMatchmaker:Int(minCount:Int, maxCount:Int)
+	Method AddMatchmaker:Int(minCount:Int, maxCount:Int, query:String, propertyKeys:String[], propertyValues:String[])
 	Method CancelMatchmaker:Int()
 	Method MatchSelfSessionId:String()
 	Method MatchPlayerCount:Int()
@@ -116,7 +140,7 @@ Type TNativeNakamaOnlineBackend Implements INakamaOnlineBackend
 	Method UserId:String() Override If client Then Return client.UserId() Else Return "" End Method
 	Method Username:String() Override If client Then Return client.Username() Else Return "" End Method
 	Method ConnectSocket:Int() Override If client Then Return client.ConnectSocket() Else Return False End Method
-	Method AddMatchmaker:Int(minCount:Int, maxCount:Int) Override If client Then Return client.AddMatchmaker(minCount, maxCount) Else Return False End Method
+	Method AddMatchmaker:Int(minCount:Int, maxCount:Int, query:String, propertyKeys:String[], propertyValues:String[]) Override If client Then Return client.AddMatchmakerProperties(minCount, maxCount, query, propertyKeys, propertyValues) Else Return False End Method
 	Method CancelMatchmaker:Int() Override If client Then Return client.CancelMatchmaker() Else Return False End Method
 	Method MatchSelfSessionId:String() Override If client Then Return client.MatchSelfSessionId() Else Return "" End Method
 	Method MatchPlayerCount:Int() Override If client Then Return client.MatchPlayerCount() Else Return 0 End Method
@@ -498,6 +522,24 @@ Type TNakamaOnlineService Implements IOnlineService
 		Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, error, code, "", New SOnlinePlayer, detail))
 	End Method
 
+	Method MatchmakingPropertiesValid:Int(properties:TOnlineProperties)
+		If Not properties Or properties.Count() > 32 Then Return False
+		For Local index:Int = 0 Until properties.Count()
+			If Not NakamaMatchmakerPropertyKeyValid(properties.KeyAt(index)) Or properties.ValueAt(index).Length > 256 Then Return False
+		Next
+		Return True
+	End Method
+
+	Method MatchmakingQuery:String(properties:TOnlineProperties)
+		If Not properties Or properties.Count() = 0 Then Return ""
+		Local result:String
+		For Local index:Int = 0 Until properties.Count()
+			If result Then result :+ " "
+			result :+ "+properties." + properties.KeyAt(index) + ":" + NakamaMatchmakerEscape(properties.ValueAt(index))
+		Next
+		Return result
+	End Method
+
 	Method PrepareMatch(matchId:String)
 		Local count:Int = _context.Backend().MatchPlayerCount()
 		If count < 1 Then Failure(EOnlineOperation.StartMatchmaking, _matchmakingRequestId, 0, "Nakama returned an empty match roster"); _matchmakingRequestId = 0; Return
@@ -616,9 +658,16 @@ Type TNakamaOnlineService Implements IOnlineService
 	Method AcceptInvitation:UInt(invitationId:String) Override Return 0 End Method
 
 	Method StartMatchmaking:UInt(request:TOnlineMatchmakingRequest) Override
-		If _state <> EOnlineServiceState.Ready Or Not request Or _matchmakingRequestId Or _readyTransport Or request.minPlayers < 2 Or request.maxPlayers < request.minPlayers Then Return 0
+		If _state <> EOnlineServiceState.Ready Or Not request Or _matchmakingRequestId Or _readyTransport Or request.minPlayers < 2 Or request.maxPlayers < request.minPlayers Or Not MatchmakingPropertiesValid(request.properties) Then Return 0
+		Local propertyCount:Int = request.properties.Count()
+		Local propertyKeys:String[] = New String[propertyCount]
+		Local propertyValues:String[] = New String[propertyCount]
+		For Local index:Int = 0 Until propertyCount
+			propertyKeys[index] = request.properties.KeyAt(index)
+			propertyValues[index] = request.properties.ValueAt(index)
+		Next
 		_matchmakingRequestId = NextRequestId()
-		If Not _context.Backend().AddMatchmaker(request.minPlayers, request.maxPlayers) Then _matchmakingRequestId = 0; Return 0
+		If Not _context.Backend().AddMatchmaker(request.minPlayers, request.maxPlayers, MatchmakingQuery(request.properties), propertyKeys, propertyValues) Then _matchmakingRequestId = 0; Return 0
 		Queue(New SOnlineEvent(EOnlineEventKind.MatchmakingStarted, EOnlineOperation.StartMatchmaking, _matchmakingRequestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))
 		Return _matchmakingRequestId
 	End Method

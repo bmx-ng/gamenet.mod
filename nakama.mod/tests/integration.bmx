@@ -50,6 +50,39 @@ While Not cancelled And MilliSecs() < deadline
 Wend
 Check(cancelled, "Nakama matchmaking cancellation event")
 
+' Exact-match properties must keep incompatible players in separate queues.
+Local redRequest:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
+redRequest.minPlayers = 2; redRequest.maxPlayers = 2; redRequest.properties.Set("mode", "red team")
+Local blueRequest:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
+blueRequest.minPlayers = 2; blueRequest.maxPlayers = 2; blueRequest.properties.Set("mode", "blue team")
+Local redId:UInt = first.StartMatchmaking(redRequest)
+Local blueId:UInt = second.StartMatchmaking(blueRequest)
+Check(redId And blueId, "start incompatible property matchmaking")
+Local incompatibleMatched:Int
+deadline = MilliSecs() + 2500
+While MilliSecs() < deadline
+	first.Pump(); second.Pump()
+	If DrainReady(first, redId) Or DrainReady(second, blueId) Then incompatibleMatched = True; Exit
+	Delay 1
+Wend
+Check(Not incompatibleMatched, "incompatible matchmaking properties remain separated")
+Check(first.CancelOperation(redId) And second.CancelOperation(blueId), "cancel incompatible property matchmaking")
+Local redCancelled:Int, blueCancelled:Int
+deadline = MilliSecs() + 5000
+While (Not redCancelled Or Not blueCancelled) And MilliSecs() < deadline
+	first.Pump(); second.Pump()
+	Local propertyEvent:SOnlineEvent
+	While first.Poll(propertyEvent)
+		If propertyEvent.Kind() = EOnlineEventKind.MatchmakingCancelled And propertyEvent.RequestId() = redId Then redCancelled = True
+	Wend
+	While second.Poll(propertyEvent)
+		If propertyEvent.Kind() = EOnlineEventKind.MatchmakingCancelled And propertyEvent.RequestId() = blueId Then blueCancelled = True
+	Wend
+	Delay 1
+Wend
+Check(redCancelled And blueCancelled, "cancelled incompatible property queues")
+
+request.properties.Set("mode", "duel")
 Local firstRequest:UInt = first.StartMatchmaking(request)
 Local secondRequest:UInt = second.StartMatchmaking(request)
 Check(firstRequest And secondRequest, "start GameNet matchmaking")

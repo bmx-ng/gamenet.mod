@@ -22,6 +22,9 @@ Type TMockNakamaBackend Implements INakamaOnlineBackend
 	Field cancelMatchmakerResult:Int = True
 	Field requestedMin:Int
 	Field requestedMax:Int
+	Field requestedQuery:String
+	Field requestedKeys:String[] = New String[0]
+	Field requestedValues:String[] = New String[0]
 	Field cancelCount:Int
 	Field selfSessionId:String = "session-local"
 	Field sentOpCode:Long
@@ -58,8 +61,9 @@ Type TMockNakamaBackend Implements INakamaOnlineBackend
 		Return True
 	End Method
 
-	Method AddMatchmaker:Int(minCount:Int, maxCount:Int) Override
+	Method AddMatchmaker:Int(minCount:Int, maxCount:Int, query:String, propertyKeys:String[], propertyValues:String[]) Override
 		requestedMin = minCount; requestedMax = maxCount
+		requestedQuery = query; requestedKeys = propertyKeys[..]; requestedValues = propertyValues[..]
 		Return addMatchmakerResult
 	End Method
 
@@ -161,9 +165,15 @@ Check(service.DroppedEvents() = 0, "online queues report no loss")
 
 Local matchmaking:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
 matchmaking.minPlayers = 2; matchmaking.maxPlayers = 4
+matchmaking.properties.Set("game-mode", "capture flag:2")
+Local invalidMatchmaking:TOnlineMatchmakingRequest = New TOnlineMatchmakingRequest
+invalidMatchmaking.properties.Set("bad.key", "value")
+Check(service.StartMatchmaking(invalidMatchmaking) = 0, "reject unsafe Nakama property key")
 Local matchRequest:UInt = service.StartMatchmaking(matchmaking)
 onlineEvent = NextOnline(service, EOnlineEventKind.MatchmakingStarted)
 Check(onlineEvent.RequestId() = matchRequest And backend.requestedMin = 2 And backend.requestedMax = 4, "forward matchmaking counts")
+Check(backend.requestedKeys.Length = 1 And backend.requestedKeys[0] = "game-mode" And backend.requestedValues[0] = "capture flag:2", "forward matchmaking properties")
+Check(backend.requestedQuery = "+properties.game-mode:capture\ flag\:2", "build escaped exact-match query")
 backend.QueueNative(MatchEvent(ENakamaEventKind.MatchJoined, "match-1"))
 service.Pump()
 onlineEvent = NextOnline(service, EOnlineEventKind.MatchReady)

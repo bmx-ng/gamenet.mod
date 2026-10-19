@@ -25,12 +25,13 @@ Module GameNet.GameKitOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
 ModuleInfo "History: 0.1 Initial GameKit online provider"
+ModuleInfo "History: 0.2 Added generic operation cancellation support"
 
 ?macos Or ios
 
@@ -452,6 +453,10 @@ Type TGameKitOnlineService Implements IOnlineService
 		_nativeMatchRequestId = 0
 		Queue(New SOnlineEvent(EOnlineEventKind.MatchmakingCancelled, EOnlineOperation.CancelMatchmaking, cancelRequestId, EOnlineError.None, 0, "", New SOnlinePlayer, ""))
 		Return cancelRequestId
+	End Method
+
+	Method CancelOperation:Int(requestId:UInt) Override
+		Return CancelMatchmaking(requestId) <> 0
 	End Method
 
 	Method StartMatch:UInt() Override

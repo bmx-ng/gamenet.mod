@@ -240,6 +240,17 @@ Type TMockOnlineService Implements IOnlineService
 		Return cancelRequestId
 	End Method
 
+	Method CancelOperation:Int(requestId:UInt) Override
+		If requestId = matchmakingRequestId Then
+			Return CancelMatchmaking(requestId) <> 0
+		End If
+		If requestId = resultsRequestId Then
+			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.FindLobbies, requestId, EOnlineError.Cancelled, 0, "", New SOnlinePlayer, "Operation cancelled"))
+			Return True
+		End If
+		Return False
+	End Method
+
 	Method StartMatch:UInt() Override
 		startRequestId = NextId()
 		Return startRequestId
@@ -361,6 +372,17 @@ Check(cancelFlow.Cancel(), "cancel native matchmaking")
 cancelFlow.Pump()
 Check(cancelFlow.State() = EOnlineFlowState.Ready, "cancel returns to ready")
 Check(HasFlowEvent(cancelFlow, EOnlineFlowEventKind.Cancelled), "cancel event")
+
+Local searchCancelService:TMockOnlineService = New TMockOnlineService(EOnlineCapability.FindLobbies)
+Local searchCancelFlow:TOnlineFlowCoordinator = TOnlineFlowCoordinator.Create(searchCancelService)
+OpenFlow(searchCancelFlow)
+Check(searchCancelFlow.FindAndJoin(New TOnlineFlowRequest), "begin cancellable lobby search")
+Check(searchCancelFlow.Cancel(), "accept lobby-search cancellation")
+Check(searchCancelFlow.State() = EOnlineFlowState.Cancelling, "wait for lobby-search cancellation")
+Check(HasFlowEvent(searchCancelFlow, EOnlineFlowEventKind.Cancelling), "cancelling event")
+searchCancelFlow.Pump()
+Check(searchCancelFlow.State() = EOnlineFlowState.Ready, "cancelled lobby search returns to ready")
+Check(HasFlowEvent(searchCancelFlow, EOnlineFlowEventKind.Cancelled), "cancelled lobby-search event")
 
 Local manualService:TMockOnlineService = New TMockOnlineService(lobbyCapabilities)
 Local manualFlow:TOnlineFlowCoordinator = TOnlineFlowCoordinator.Create(manualService)

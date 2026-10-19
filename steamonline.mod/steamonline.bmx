@@ -13,10 +13,11 @@ Module GameNet.SteamOnline
 
 ?bmxng2
 
-ModuleInfo "Version: 0.4"
+ModuleInfo "Version: 0.5"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
+ModuleInfo "History: 0.5 Added compensated cancellation for lobby operations"
 ModuleInfo "History: 0.4 Added known dedicated-server routing through Steam lobbies"
 ModuleInfo "History: 0.3 Added an optional Steam Networking Sockets transport"
 ModuleInfo "History: 0.2 Added a testable Steam backend boundary and provider flow tests"
@@ -291,11 +292,15 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	Field _eventCount:Int
 	Field _droppedEvents:UInt
 	Field _createRequestId:UInt
+	Field _cancelCreateRequestId:UInt
 	Field _createOptions:TOnlineLobbyOptions
 	Field _findRequestId:UInt
+	Field _cancelFindRequestId:UInt
 	Field _findResults:IOnlineLobby[] = New IOnlineLobby[0]
 	Field _findResultsRequestId:UInt
 	Field _joinRequestId:UInt
+	Field _joinOperation:EOnlineOperation
+	Field _cancelJoinRequestId:UInt
 	Field _leaveRequestId:UInt
 	Field _currentLobbyId:ULong
 	Field _currentLobby:IOnlineLobby
@@ -343,6 +348,10 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		_events[_eventWrite] = event
 		_eventWrite = (_eventWrite + 1) Mod _events.Length
 		_eventCount :+ 1
+	End Method
+
+	Method QueueCancelled(operation:EOnlineOperation, requestId:UInt, subjectId:String = "")
+		Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, EOnlineError.Cancelled, 0, subjectId, New SOnlinePlayer, "Operation cancelled"))
 	End Method
 
 	Method SteamPlayer:SOnlinePlayer(steamId:ULong, local:Int = False)
@@ -594,6 +603,7 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		Local nativeId:ULong = lobbyId.ToULong()
 		If nativeId = 0 Then Return 0
 		_joinRequestId = NextRequestId()
+		_joinOperation = EOnlineOperation.JoinLobby
 		_backend.JoinLobby(nativeId)
 		Return _joinRequestId
 	End Method
@@ -610,7 +620,11 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	End Method
 
 	Method AcceptInvitation:UInt(invitationId:String) Override
-		Return JoinLobby(invitationId)
+		Local requestId:UInt = JoinLobby(invitationId)
+		If requestId Then
+			_joinOperation = EOnlineOperation.AcceptInvitation
+		End If
+		Return requestId
 	End Method
 
 	Method StartMatchmaking:UInt(request:TOnlineMatchmakingRequest) Override
@@ -619,6 +633,25 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 
 	Method CancelMatchmaking:UInt(requestId:UInt) Override
 		Return 0
+	End Method
+
+	Method CancelOperation:Int(requestId:UInt) Override
+		If requestId = 0 Then
+			Return False
+		End If
+		If requestId = _createRequestId And _cancelCreateRequestId = 0 Then
+			_cancelCreateRequestId = requestId
+			Return True
+		End If
+		If requestId = _findRequestId And _cancelFindRequestId = 0 Then
+			_cancelFindRequestId = requestId
+			Return True
+		End If
+		If requestId = _joinRequestId And _cancelJoinRequestId = 0 Then
+			_cancelJoinRequestId = requestId
+			Return True
+		End If
+		Return False
 	End Method
 
 	Method StartMatch:UInt() Override
@@ -672,6 +705,15 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	Method OnLobbyCreated(result:EResult, steamIDLobby:ULong, ioFailure:Int) Override
 		Local requestId:UInt = _createRequestId
 		_createRequestId = 0
+		If requestId And requestId = _cancelCreateRequestId Then
+			_cancelCreateRequestId = 0
+			_createOptions = Null
+			If Not ioFailure And result = EResult.k_EResultOK And steamIDLobby Then
+				_backend.LeaveLobby(steamIDLobby)
+			End If
+			QueueCancelled(EOnlineOperation.CreateLobby, requestId, String(steamIDLobby))
+			Return
+		End If
 		If ioFailure Or result <> EResult.k_EResultOK Or steamIDLobby = 0 Then
 			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.CreateLobby, requestId, EOnlineError.ProviderFailure, Int(result), "", New SOnlinePlayer, "Steam could not create the lobby"))
 			_createOptions = Null
@@ -692,6 +734,13 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	Method OnLobbyMatchList(lobbyCount:UInt, ioFailure:Int) Override
 		Local requestId:UInt = _findRequestId
 		_findRequestId = 0
+		If requestId And requestId = _cancelFindRequestId Then
+			_cancelFindRequestId = 0
+			_findResults = New IOnlineLobby[0]
+			_findResultsRequestId = 0
+			QueueCancelled(EOnlineOperation.FindLobbies, requestId)
+			Return
+		End If
 		If ioFailure Then
 			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.FindLobbies, requestId, EOnlineError.Network, 0, "", New SOnlinePlayer, "Steam lobby search failed"))
 			Return
@@ -705,10 +754,26 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 	End Method
 
 	Method OnLobbyEnter(steamIDLobby:ULong, locked:Int, response:EChatRoomEnterResponse) Override
+		Local operation:EOnlineOperation = _joinOperation
+		If operation = EOnlineOperation.None Then
+			operation = EOnlineOperation.JoinLobby
+		End If
+		If _joinRequestId And _joinRequestId = _cancelJoinRequestId Then
+			Local requestId:UInt = _joinRequestId
+			_joinRequestId = 0
+			_joinOperation = EOnlineOperation.None
+			_cancelJoinRequestId = 0
+			If response = EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess And steamIDLobby Then
+				_backend.LeaveLobby(steamIDLobby)
+			End If
+			QueueCancelled(operation, requestId, String(steamIDLobby))
+			Return
+		End If
 		If response <> EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess Then
 			Local requestId:UInt = _joinRequestId
 			_joinRequestId = 0
-			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, EOnlineOperation.JoinLobby, requestId, EOnlineError.Rejected, Int(response), String(steamIDLobby), New SOnlinePlayer, "Steam rejected the lobby join"))
+			_joinOperation = EOnlineOperation.None
+			Queue(New SOnlineEvent(EOnlineEventKind.OperationFailed, operation, requestId, EOnlineError.Rejected, Int(response), String(steamIDLobby), New SOnlinePlayer, "Steam rejected the lobby join"))
 			Return
 		End If
 		_currentLobbyId = steamIDLobby
@@ -716,7 +781,8 @@ Type TSteamOnlineService Implements IOnlineService, ISteamMatchmakingListener
 		If _joinRequestId Then
 			Local requestId:UInt = _joinRequestId
 			_joinRequestId = 0
-			Queue(New SOnlineEvent(EOnlineEventKind.LobbyJoined, EOnlineOperation.JoinLobby, requestId, EOnlineError.None, 0, String(steamIDLobby), New SOnlinePlayer, ""))
+			_joinOperation = EOnlineOperation.None
+			Queue(New SOnlineEvent(EOnlineEventKind.LobbyJoined, operation, requestId, EOnlineError.None, 0, String(steamIDLobby), New SOnlinePlayer, ""))
 		End If
 	End Method
 

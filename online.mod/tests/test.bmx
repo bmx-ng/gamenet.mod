@@ -20,6 +20,7 @@ Type TContractService Implements IOnlineService
 	Method LeaveLobby:UInt() Override Return 0 End Method
 	Method AcceptInvitation:UInt(invitationId:String) Override Return 0 End Method
 	Method StartMatchmaking:UInt(request:TOnlineMatchmakingRequest) Override Return 0 End Method
+	Method CancelOperation:Int(requestId:UInt) Override Return False End Method
 	Method CancelMatchmaking:UInt(requestId:UInt) Override Return 0 End Method
 	Method StartMatch:UInt() Override Return 0 End Method
 	Method MatchInfo:Int(requestId:UInt, info:SOnlineMatchInfo Var) Override Return False End Method

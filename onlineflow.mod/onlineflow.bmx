@@ -25,12 +25,13 @@ Module GameNet.OnlineFlow
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
 ModuleInfo "History: 0.1 Initial online-flow coordinator"
+ModuleInfo "History: 0.2 Added cancellation for in-flight provider operations"
 
 Import GameNet.Online
 Import BRL.Blitz
@@ -46,6 +47,7 @@ Enum EOnlineFlowState:Byte
 	Creating
 	Joining
 	Matchmaking
+	Cancelling
 	WaitingForPlayers
 	StartingMatch
 	MatchReady
@@ -75,6 +77,7 @@ Enum EOnlineFlowEventKind:Byte
 	Creating
 	Joining
 	Matchmaking
+	Cancelling
 	WaitingForPlayers
 	StartingMatch
 	InvitationReceived
@@ -220,6 +223,7 @@ Type TOnlineFlowCoordinator
 	Field _usingMatchmaking:Int
 	Field _operationRequestId:UInt
 	Field _matchmakingRequestId:UInt
+	Field _cancelLeaving:Int
 	Field _readyRequestId:UInt
 	Field _readyInfo:SOnlineMatchInfo
 	Field _events:SOnlineFlowEvent[]
@@ -253,6 +257,7 @@ Type TOnlineFlowCoordinator
 		_state = EOnlineFlowState.Failed
 		_operationRequestId = 0
 		_matchmakingRequestId = 0
+		_cancelLeaving = False
 		Queue(EOnlineFlowEventKind.Failed, error, providerCode, "", New SOnlinePlayer, CurrentPlayerCount(), detail)
 	End Method
 
@@ -476,8 +481,9 @@ Type TOnlineFlowCoordinator
 				End If
 
 			Case EOnlineEventKind.MatchmakingCancelled
-				If _state = EOnlineFlowState.Matchmaking Then
+				If _state = EOnlineFlowState.Matchmaking Or _state = EOnlineFlowState.Cancelling Then
 					_matchmakingRequestId = 0
+					ClearAction()
 					SetState(EOnlineFlowState.Ready, EOnlineFlowEventKind.Cancelled)
 				End If
 
@@ -490,7 +496,12 @@ Type TOnlineFlowCoordinator
 				_operationRequestId = 0
 				DiscardReadyTransport()
 				ClearAction()
-				SetState(EOnlineFlowState.Ready, EOnlineFlowEventKind.Left)
+				If _cancelLeaving Then
+					_cancelLeaving = False
+					SetState(EOnlineFlowState.Ready, EOnlineFlowEventKind.Cancelled)
+				Else
+					SetState(EOnlineFlowState.Ready, EOnlineFlowEventKind.Left)
+				End If
 
 			Case EOnlineEventKind.ServiceClosed
 				_operationRequestId = 0
@@ -502,7 +513,14 @@ Type TOnlineFlowCoordinator
 
 			Case EOnlineEventKind.OperationFailed
 				If event.RequestId() = 0 Or event.RequestId() = _operationRequestId Or event.RequestId() = _matchmakingRequestId Then
-					Fail(event.Error(), event.ProviderCode(), event.Detail())
+					If event.Error() = EOnlineError.Cancelled Then
+						_operationRequestId = 0
+						_matchmakingRequestId = 0
+						ClearAction()
+						SetState(EOnlineFlowState.Ready, EOnlineFlowEventKind.Cancelled, event.Detail())
+					Else
+						Fail(event.Error(), event.ProviderCode(), event.Detail())
+					End If
 				End If
 		End Select
 	End Method
@@ -628,17 +646,33 @@ Type TOnlineFlowCoordinator
 	End Method
 
 	Rem
-	bbdoc: Cancels native matchmaking, or leaves a lobby while waiting for a match.
-	about: The common provider interface does not currently expose cancellation
-	for an in-flight lobby search, create, or join operation.
+	bbdoc: Cancels the active search, create, join, matchmaking, or waiting flow.
+	about: Cancellation is asynchronous. The coordinator remains in Cancelling
+	until the provider has stopped the operation or undone any late success.
 	End Rem
 	Method Cancel:Int()
+		If _state = EOnlineFlowState.Searching Or _state = EOnlineFlowState.Creating Or _state = EOnlineFlowState.Joining Then
+			If _operationRequestId = 0 Or Not _service.CancelOperation(_operationRequestId) Then
+				Return False
+			End If
+			SetState(EOnlineFlowState.Cancelling, EOnlineFlowEventKind.Cancelling)
+			Return True
+		End If
 		If _state = EOnlineFlowState.Matchmaking And _matchmakingRequestId Then
-			Local cancelRequestId:UInt = _service.CancelMatchmaking(_matchmakingRequestId)
-			Return cancelRequestId <> 0
+			If Not _service.CancelOperation(_matchmakingRequestId) Then
+				Return False
+			End If
+			SetState(EOnlineFlowState.Cancelling, EOnlineFlowEventKind.Cancelling)
+			Return True
 		End If
 		If (_state = EOnlineFlowState.WaitingForPlayers Or _state = EOnlineFlowState.StartingMatch) And _service.CurrentLobby() Then
-			Return Leave()
+			_cancelLeaving = True
+			If Not Leave() Then
+				_cancelLeaving = False
+				Return False
+			End If
+			SetState(EOnlineFlowState.Cancelling, EOnlineFlowEventKind.Cancelling)
+			Return True
 		End If
 		Return False
 	End Method
@@ -668,6 +702,7 @@ Type TOnlineFlowCoordinator
 		ClearAction()
 		_operationRequestId = 0
 		_matchmakingRequestId = 0
+		_cancelLeaving = False
 		_readyRequestId = 0
 		_readyInfo = New SOnlineMatchInfo
 		If _service.State() = EOnlineServiceState.Ready Then

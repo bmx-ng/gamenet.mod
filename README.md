@@ -38,7 +38,8 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.OnlineFlow` turns player-facing Host, Find and Join, Quick Play, and
   Accept Invitation actions into the appropriate provider operations. It owns
   asynchronous request correlation, find-join-or-create fallback, waiting for
-  players, match startup, and the one-time transport handoff.
+  players, cancellable in-flight operations, match startup, and the one-time
+  transport handoff.
 - `GameNet.Impairment` decorates any transport with deterministic, bounded
   latency, jitter, bandwidth, loss, duplication, and reordering simulation.
 - `GameNet.Session` adds a versioned handshake, framed application messages,

@@ -317,4 +317,31 @@ createFailure.OnLobbyCreated(EResult.k_EResultFail, 0, False)
 event = NextEvent(createFailure, EOnlineEventKind.OperationFailed)
 Check(event.RequestId() = createRequest And event.Operation() = EOnlineOperation.CreateLobby, "report lobby creation failure")
 
+' Steam cannot stop submitted matchmaking calls, so cancellation waits for the
+' callback and compensates any late lobby membership before completing.
+Local cancelBackend:TMockSteamOnlineBackend = New TMockSteamOnlineBackend
+Local cancelService:TSteamOnlineService = TSteamOnlineService.CreateForBackend(cancelBackend)
+cancelService.Open()
+NextEvent(cancelService, EOnlineEventKind.ServiceReady)
+createRequest = cancelService.CreateLobby(options)
+Check(cancelService.CancelOperation(createRequest), "accept Steam create cancellation")
+cancelService.OnLobbyCreated(EResult.k_EResultOK, cancelBackend.lobbyId, False)
+event = NextEvent(cancelService, EOnlineEventKind.OperationFailed)
+Check(event.RequestId() = createRequest And event.Error() = EOnlineError.Cancelled, "complete Steam create cancellation")
+Check(cancelBackend.leftLobbyId = cancelBackend.lobbyId And Not cancelService.CurrentLobby(), "leave late Steam-created lobby")
+
+findRequest = cancelService.FindLobbies(query)
+Check(cancelService.CancelOperation(findRequest), "accept Steam search cancellation")
+cancelService.OnLobbyMatchList(1, False)
+event = NextEvent(cancelService, EOnlineEventKind.OperationFailed)
+Check(event.RequestId() = findRequest And event.Error() = EOnlineError.Cancelled, "complete Steam search cancellation")
+Check(cancelService.LobbyResultCount(findRequest) = 0, "discard cancelled Steam search results")
+
+joinRequest = cancelService.JoinLobby("500")
+Check(cancelService.CancelOperation(joinRequest), "accept Steam join cancellation")
+cancelService.OnLobbyEnter(500, False, EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess)
+event = NextEvent(cancelService, EOnlineEventKind.OperationFailed)
+Check(event.RequestId() = joinRequest And event.Error() = EOnlineError.Cancelled, "complete Steam join cancellation")
+Check(cancelBackend.leftLobbyId = 500 And Not cancelService.CurrentLobby(), "leave late Steam-joined lobby")
+
 Print "GameNet.SteamOnline tests passed"

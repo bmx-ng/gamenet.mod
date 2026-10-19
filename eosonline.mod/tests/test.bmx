@@ -169,7 +169,7 @@ End Function
 
 Function NextEvent:SOnlineEvent(service:TEOSOnlineService, expected:EOnlineEventKind)
 	Local event:SOnlineEvent
-	Check(service.Poll(event), "expected online event")
+	Check(service.Poll(event), "expected online event " + Int(expected))
 	Check(event.Kind() = expected, "expected event " + Int(expected) + ", got " + Int(event.Kind()))
 	Return event
 End Function
@@ -309,5 +309,39 @@ Check(acceptRequest <> 0 And inviteBackend.acceptedInviteId = "invite-9", "accep
 inviteService.OnEOSOnlineLobbyJoined(EEOSResult.Success, Snapshot("remote-puid", "local-puid"))
 event = NextEvent(inviteService, EOnlineEventKind.LobbyJoined)
 Check(event.RequestId() = acceptRequest And event.Operation() = EOnlineOperation.AcceptInvitation, "correlate accepted invitation")
+
+' EOS cancellation also settles only after a late create or join has been
+' removed again, so callers never observe a normal success after cancelling.
+Local cancelBackend:TMockEOSOnlineBackend = New TMockEOSOnlineBackend
+Local cancelService:TEOSOnlineService = TEOSOnlineService.CreateForBackend(cancelBackend, "duel")
+cancelService.Open()
+NextEvent(cancelService, EOnlineEventKind.ServiceReady)
+createRequest = cancelService.CreateLobby(options)
+Check(cancelService.CancelOperation(createRequest), "accept EOS create cancellation")
+cancelService.OnEOSOnlineLobbyCreated(EEOSResult.Success, Snapshot("remote-puid", "local-puid"))
+Check(cancelBackend.leftLobbyId = "lobby-1" And cancelBackend.leftAsOwner, "destroy late EOS-created lobby")
+Local cancelledPending:SOnlineEvent
+Check(Not cancelService.Poll(cancelledPending), "wait for EOS create cleanup")
+cancelService.OnEOSOnlineLobbyLeft(EEOSResult.Success, "lobby-1")
+event = NextEvent(cancelService, EOnlineEventKind.OperationFailed)
+Check(event.RequestId() = createRequest And event.Error() = EOnlineError.Cancelled, "complete EOS create cancellation")
+Check(Not cancelService.CurrentLobby(), "do not expose cancelled EOS-created lobby")
+
+findRequest = cancelService.FindLobbies(query)
+Check(cancelService.CancelOperation(findRequest), "accept EOS search cancellation")
+cancelService.OnEOSOnlineLobbySearch(EEOSResult.Success, results)
+event = NextEvent(cancelService, EOnlineEventKind.OperationFailed)
+Check(event.RequestId() = findRequest And event.Error() = EOnlineError.Cancelled, "complete EOS search cancellation")
+Check(cancelService.LobbyResultCount(findRequest) = 0, "discard cancelled EOS search results")
+
+joinRequest = cancelService.JoinLobby("lobby-1")
+Check(cancelService.CancelOperation(joinRequest), "accept EOS join cancellation")
+cancelService.OnEOSOnlineLobbyJoined(EEOSResult.Success, Snapshot("local-puid", "remote-puid"))
+Check(cancelBackend.leftLobbyId = "lobby-1" And Not cancelBackend.leftAsOwner, "leave late EOS-joined lobby")
+Check(Not cancelService.Poll(cancelledPending), "wait for EOS join cleanup")
+cancelService.OnEOSOnlineLobbyLeft(EEOSResult.Success, "lobby-1")
+event = NextEvent(cancelService, EOnlineEventKind.OperationFailed)
+Check(event.RequestId() = joinRequest And event.Error() = EOnlineError.Cancelled, "complete EOS join cancellation")
+Check(Not cancelService.CurrentLobby(), "do not expose cancelled EOS-joined lobby")
 
 Print "GameNet.EOSOnline tests passed"

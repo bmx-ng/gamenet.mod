@@ -210,6 +210,24 @@ Check(stalledInfo.Status() = ERollbackStepStatus.Ready And stalledInfo.InputFram
 stalledSession.Stop()
 Check(stalledSession.StepStatus() = ERollbackStepStatus.Stopped, "stopped step status")
 
+' Frame pacing reports how far the local simulation leads the slowest peer,
+' while leaving the render loop in control of whether to defer a step.
+Local pacingConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 0, 32, 4, 1, 0, 8, 4)
+Local pacingSession:TRollbackSession = TRollbackSession.Create(New TPlainSimulation, pacingConfig)
+Check(pacingSession.Start(Byte Ptr(plainNeutral), 1), "start pacing session")
+For Local frame:Int = 0 Until 4
+	Check(pacingSession.Step(Byte Ptr(plainNeutral), 1), "advance pacing session")
+Next
+Local pacingInfo:SRollbackPacingInfo = pacingSession.PacingInfo()
+Check(Not pacingInfo.IsAvailable(), "pacing waits for remote progress")
+Local pacingPacket:Byte[32]
+Local pacingLength:Size_T = WriteSingleInputBatch(Byte Ptr(pacingPacket), Size_T(pacingPacket.Length), 1, 0, 0)
+Check(pacingSession.ReceiveInputs(1, New SPacketView(Byte Ptr(pacingPacket), pacingLength)), "receive pacing progress")
+pacingInfo = pacingSession.PacingInfo(1, 2)
+Check(pacingInfo.IsAvailable(), "pacing becomes available")
+Check(pacingInfo.LocalFrame() = 4 And pacingInfo.SlowestRemoteFrame() = 1, "report pacing frames")
+Check(pacingInfo.FrameAdvantage() = 3 And pacingInfo.RecommendedDelayFrames() = 2, "bound frame pacing recommendation")
+
 ' A resumed non-authority can request recovery before a hash mismatch is observed.
 Local recoverySimulation:TPlainSimulation = New TPlainSimulation
 Local recoveryConfig:SRollbackSessionConfig = New SRollbackSessionConfig(2, 1, 32, 4, 1)

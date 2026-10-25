@@ -100,11 +100,29 @@ For Local frame:UInt = 5 Until 15
 	Check(sourceSession.Step(Byte Ptr(localInput), 1), "advance live source")
 	Local remoteLength:Size_T = WriteRemoteInput(Byte Ptr(remotePacket), Size_T(remotePacket.Length), frame + 1, frame, 0)
 	Check(sourceSession.ReceiveInputs(1, New SPacketView(Byte Ptr(remotePacket), remoteLength)), "confirm live source input")
-	Local frameLength:Size_T = source.WriteNextFrame(Byte Ptr(packet), Size_T(packet.Length))
-	Check(frameLength > 0, "write confirmed spectator frame")
-	Check(spectator.ReceiveFrame(New SPacketView(Byte Ptr(packet), frameLength)), "play confirmed spectator frame")
-	Check(source.CommitFrame(frame), "commit confirmed spectator frame")
 Next
+
+Check(source.BacklogFrames() = 10, "measure spectator backlog")
+Check(source.NeedsRebootstrap(8) And Not source.NeedsRebootstrap(10), "apply bounded slow-spectator policy")
+Check(source.BatchPacketCapacity(4) >= 11 + 4 * (4 + 2 * 3), "report spectator batch capacity")
+
+' The single-frame form remains useful for live playback at normal speed.
+Local frameLength:Size_T = source.WriteNextFrame(Byte Ptr(packet), Size_T(packet.Length))
+Check(frameLength > 0, "write confirmed spectator frame")
+Check(spectator.ReceiveFrame(New SPacketView(Byte Ptr(packet), frameLength)), "play confirmed spectator frame")
+Check(source.CommitFrame(5), "commit confirmed spectator frame")
+
+' A lagging spectator catches up in bounded batches. Writing is non-consuming,
+' and the exact pending range must be committed after transport acceptance.
+While source.BacklogFrames() > 0
+	Local firstFrame:UInt = source.NextFrame()
+	Local batchLength:Size_T = source.WriteNextFrames(Byte Ptr(packet), Size_T(packet.Length), 4)
+	Local batchCount:Int = source.PendingFrameCount()
+	Check(batchLength > 0 And batchCount >= 1 And batchCount <= 4, "write bounded spectator batch")
+	Check(Not source.CommitFrames(firstFrame, batchCount + 1), "reject incorrect spectator batch commit")
+	Check(spectator.ReceiveFrames(New SPacketView(Byte Ptr(packet), batchLength)), "play confirmed spectator batch")
+	Check(source.CommitFrames(firstFrame, batchCount), "commit confirmed spectator batch")
+Wend
 
 Check(spectator.FramesPlayed() = 10 And spectator.CurrentFrame() = 15, "spectator timeline remains sequential")
 Check(spectatorSimulation.values[0] = sourceSimulation.values[0] And spectatorSimulation.values[1] = sourceSimulation.values[1], "spectator converges with live source")

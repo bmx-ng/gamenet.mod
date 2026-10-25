@@ -264,19 +264,25 @@ results on one machine do not prove that floating-point behaviour will match
 another compiler or CPU.
 
 `TRollbackSession.PacingInfo` compares the local frame with the slowest reported
-remote frame. When the local simulation exceeds the acceptable lead, it returns
-a bounded number of simulation steps to defer. Continue pumping networking and
-rendering while deferring those steps. The rollback layer deliberately does not
-sleep internally or modify input delay, because the application owns its render
-loop and fixed-step accumulator.
+remote frame. Feed those samples to `TRollbackPacingController`; it averages a
+bounded sample window and uses separate enter and exit thresholds so minor
+frame fluctuations do not alternate between delay and no-delay decisions. When
+it recommends a delay, defer at most that many simulation steps while continuing
+to pump networking and render. The rollback layer deliberately does not sleep
+internally or modify input delay, because the application owns its render loop
+and fixed-step accumulator.
 
 For live viewing, `GameNet.RollbackSpectator` captures a confirmed state and
-then streams confirmed input frames. Send bootstrap and frame packets reliably
-and in order, and call the source's matching commit method only after the send
-is accepted. Spectators never predict, so their presentation trails the active
-players by the confirmation window but never rolls back. Each frame includes
-the source state hash; a divergent spectator stops with an explicit hash
-mismatch rather than silently showing a different match.
+then streams confirmed input frames. Send bootstrap, frame, and batch packets
+reliably and in order, and call the source's matching commit method only after
+the send is accepted. `BacklogFrames` measures viewer lag, while
+`NeedsRebootstrap` applies an application-chosen upper bound and lets a slow
+viewer restart from the newest confirmed state instead of retaining an
+unbounded queue. `WriteNextFrames` packages a bounded catch-up burst. Spectators
+never predict, so their presentation trails the active players by the
+confirmation window but never rolls back. Each frame includes the source state
+hash; a divergent spectator stops with an explicit hash mismatch rather than
+silently showing a different match.
 
 ## Treat mobile suspension as part of the protocol
 
@@ -313,6 +319,10 @@ Next, use `GameNet.Impairment` for repeatable latency, jitter, loss,
 duplication, reordering, bandwidth limits and temporary blackouts. Short tests
 are useful for individual recovery paths; longer scripted soak tests find slow
 queue growth, wraparound mistakes and rare ordering combinations.
+
+The rollback soak protocol test runs 5,000 frames through deterministic delay,
+reordering, loss, and duplication. It verifies final convergence, exercises
+actual rollback, and checks that neither session enters a failed state.
 
 Finally, test the real backends on real devices. Include background and
 foreground transitions, network changes and participant loss. A two-player

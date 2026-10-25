@@ -73,8 +73,13 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a
   reusable two- to eight-player deterministic timeline with input delay,
   redundant delivery, re-simulation, confirmed presentation effects, state
-  hashes, bounded authority-based resynchronisation, and explicit failure
-  and input-stall diagnostics.
+  hashes, bounded authority-based resynchronisation, frame-advantage pacing
+  guidance, and explicit failure and input-stall diagnostics.
+- `GameNet.RollbackSyncTest` automatically executes frames twice from the same
+  state to identify hidden nondeterminism and its first differing state byte.
+- `GameNet.RollbackSpectator` starts viewers from a confirmed mid-match state
+  and advances them through a reliable ordered stream of confirmed inputs,
+  without prediction or rollback.
 - `GameNet.Replay` optionally records bounded confirmed-input timelines with
   opaque initial state, verification hashes, cursor playback, and portable
   serialization.

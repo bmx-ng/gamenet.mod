@@ -254,6 +254,30 @@ and state-sync message. All peers must use the same setting because it changes
 the wire format. A stronger hash improves diagnostics; it does not repair a
 non-deterministic simulation and is not protection against a malicious peer.
 
+Use `GameNet.RollbackSyncTest` during development to find nondeterministic
+state before it becomes a network-only failure. Its `Step` method executes the
+same frame twice from the same saved state, compares the complete resulting
+state byte-for-byte, and leaves the simulation at the result of one execution.
+A failure reports the frame, reason, and first differing byte offset. Run long
+scripted input sequences through it on every supported architecture; matching
+results on one machine do not prove that floating-point behaviour will match
+another compiler or CPU.
+
+`TRollbackSession.PacingInfo` compares the local frame with the slowest reported
+remote frame. When the local simulation exceeds the acceptable lead, it returns
+a bounded number of simulation steps to defer. Continue pumping networking and
+rendering while deferring those steps. The rollback layer deliberately does not
+sleep internally or modify input delay, because the application owns its render
+loop and fixed-step accumulator.
+
+For live viewing, `GameNet.RollbackSpectator` captures a confirmed state and
+then streams confirmed input frames. Send bootstrap and frame packets reliably
+and in order, and call the source's matching commit method only after the send
+is accepted. Spectators never predict, so their presentation trails the active
+players by the confirmation window but never rolls back. Each frame includes
+the source state hash; a divergent spectator stops with an explicit hash
+mismatch rather than silently showing a different match.
+
 ## Treat mobile suspension as part of the protocol
 
 When a mobile app enters the background, it may stop running for much longer

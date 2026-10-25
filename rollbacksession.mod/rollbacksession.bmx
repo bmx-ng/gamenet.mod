@@ -25,12 +25,13 @@ Module GameNet.RollbackSession
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
 ModuleInfo "History: 0.1 Initial rollback session"
+ModuleInfo "History: 0.2 Added pacing guidance and confirmed state access"
 
 Import GameNet.Session
 Import GameNet.Rollback
@@ -236,6 +237,53 @@ Struct SRollbackStepInfo
 
 	Method StateSyncMismatchFrame:UInt()
 		Return _stateSyncMismatchFrame
+	End Method
+End Struct
+
+Rem
+bbdoc: Frame-advantage information for smoothly pacing a rollback simulation.
+about: A positive advantage means the local simulation is ahead of the slowest
+remote player. Applications may defer that many render-loop simulation steps,
+up to RecommendedDelayFrames, without adding delay to every input.
+End Rem
+Struct SRollbackPacingInfo
+	Private
+	Field _available:Int
+	Field _localFrame:UInt
+	Field _slowestRemoteFrame:UInt
+	Field _frameAdvantage:Int
+	Field _recommendedDelayFrames:Int
+
+	Method New(available:Int, localFrame:UInt, slowestRemoteFrame:UInt, frameAdvantage:Int, recommendedDelayFrames:Int)
+		_available = available
+		_localFrame = localFrame
+		_slowestRemoteFrame = slowestRemoteFrame
+		_frameAdvantage = frameAdvantage
+		_recommendedDelayFrames = recommendedDelayFrames
+	End Method
+
+	Public
+	Method New()
+	End Method
+
+	Method IsAvailable:Int()
+		Return _available
+	End Method
+
+	Method LocalFrame:UInt()
+		Return _localFrame
+	End Method
+
+	Method SlowestRemoteFrame:UInt()
+		Return _slowestRemoteFrame
+	End Method
+
+	Method FrameAdvantage:Int()
+		Return _frameAdvantage
+	End Method
+
+	Method RecommendedDelayFrames:Int()
+		Return _recommendedDelayFrames
 	End Method
 End Struct
 
@@ -1125,6 +1173,10 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Return _needsStateSync
 	End Method
 
+	Method HasPendingRollback:Int()
+		Return _rollback.NeedsRollback()
+	End Method
+
 	Method StateSyncMismatchFrame:UInt()
 		Return _stateSyncMismatchFrame
 	End Method
@@ -1190,6 +1242,26 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		Return slowest
 	End Method
 
+	Rem
+	bbdoc: Returns a bounded recommendation for correcting local frame advantage.
+	param acceptableLead: Frames the local simulation may lead without correction.
+	param maximumDelay: Maximum simulation steps to defer from one recommendation.
+	about: This does not sleep or alter the rollback timeline. Callers normally
+	defer simulation steps while continuing to pump networking and render.
+	End Rem
+	Method PacingInfo:SRollbackPacingInfo(acceptableLead:Int = 2, maximumDelay:Int = 1)
+		If acceptableLead < 0 Or maximumDelay < 0 Or Not HasRemoteFrame() Then
+			Return New SRollbackPacingInfo
+		End If
+		Local remoteFrame:UInt = RemoteSimulationFrame()
+		Local advantage:Int = RollbackFrameDelta(_currentFrame, remoteFrame)
+		Local delayFrames:Int
+		If advantage > acceptableLead Then
+			delayFrames = Min(advantage - acceptableLead, maximumDelay)
+		End If
+		Return New SRollbackPacingInfo(True, _currentFrame, remoteFrame, advantage, delayFrames)
+	End Method
+
 	Method PlayerCount:Int()
 		Return _config.playerCount
 	End Method
@@ -1200,6 +1272,14 @@ Type TRollbackSession Implements IRollbackEffectWriter
 
 	Method AuthorityPlayer:Int()
 		Return _config.authorityPlayer
+	End Method
+
+	Method MaxStateSize:Size_T()
+		Return _config.maxStateSize
+	End Method
+
+	Method MaxInputSize:Size_T()
+		Return _config.maxInputSize
 	End Method
 
 	Method HasConfirmedFrame:Int()
@@ -1223,6 +1303,15 @@ Type TRollbackSession Implements IRollbackEffectWriter
 		End If
 		payload = input.Payload()
 		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns deterministic state saved at the beginning of @frame.
+	about: The borrowed view remains valid only until the rollback session changes.
+	This is primarily intended for confirmed spectator bootstrap and diagnostics.
+	End Rem
+	Method GetSavedState:Int(frame:UInt, state:SPacketView Var)
+		Return _rollback.GetState(frame, state)
 	End Method
 
 	Method RollbackCount:Int()

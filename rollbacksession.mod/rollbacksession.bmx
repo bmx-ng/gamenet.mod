@@ -25,13 +25,14 @@ Module GameNet.RollbackSession
 
 ?bmxng2
 
-ModuleInfo "Version: 0.2"
+ModuleInfo "Version: 0.3"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 
 ModuleInfo "History: 0.1 Initial rollback session"
 ModuleInfo "History: 0.2 Added pacing guidance and confirmed state access"
+ModuleInfo "History: 0.3 Added smoothed frame pacing with hysteresis"
 
 Import GameNet.Session
 Import GameNet.Rollback
@@ -286,6 +287,136 @@ Struct SRollbackPacingInfo
 		Return _recommendedDelayFrames
 	End Method
 End Struct
+
+Rem
+bbdoc: Smoothed frame-pacing recommendation from a #TRollbackPacingController.
+End Rem
+Struct SRollbackPacingDecision
+	Private
+	Field _available:Int
+	Field _stable:Int
+	Field _rawAdvantage:Int
+	Field _smoothedAdvantage:Int
+	Field _recommendedDelayFrames:Int
+
+	Method New(available:Int, stable:Int, rawAdvantage:Int, smoothedAdvantage:Int, recommendedDelayFrames:Int)
+		_available = available
+		_stable = stable
+		_rawAdvantage = rawAdvantage
+		_smoothedAdvantage = smoothedAdvantage
+		_recommendedDelayFrames = recommendedDelayFrames
+	End Method
+
+	Public
+	Method New()
+	End Method
+
+	Method IsAvailable:Int()
+		Return _available
+	End Method
+
+	Method IsStable:Int()
+		Return _stable
+	End Method
+
+	Method RawAdvantage:Int()
+		Return _rawAdvantage
+	End Method
+
+	Method SmoothedAdvantage:Int()
+		Return _smoothedAdvantage
+	End Method
+
+	Method RecommendedDelayFrames:Int()
+		Return _recommendedDelayFrames
+	End Method
+
+	Method ShouldDelay:Int()
+		Return _recommendedDelayFrames > 0
+	End Method
+End Struct
+
+Rem
+bbdoc: Smooths frame advantage and applies hysteresis to pacing recommendations.
+about: The controller activates only after a complete sample window reaches
+@enterLead and remains active until the average falls to @exitLead. This avoids
+alternating between delay and no-delay decisions around one threshold.
+End Rem
+Type TRollbackPacingController
+	Private
+	Field _samples:Int[]
+	Field _sampleIndex:Int
+	Field _sampleCount:Int
+	Field _sampleSum:Long
+	Field _enterLead:Int
+	Field _exitLead:Int
+	Field _maximumDelay:Int
+	Field _active:Int
+	Field _recommendationCount:Long
+
+	Method New(sampleCount:Int, enterLead:Int, exitLead:Int, maximumDelay:Int)
+		_samples = New Int[sampleCount]
+		_enterLead = enterLead
+		_exitLead = exitLead
+		_maximumDelay = maximumDelay
+	End Method
+
+	Public
+	Function Create:TRollbackPacingController(sampleCount:Int = 8, enterLead:Int = 3, exitLead:Int = 1, maximumDelay:Int = 1)
+		If sampleCount < 1 Or enterLead < 1 Or exitLead < 0 Or exitLead >= enterLead Or maximumDelay < 1 Then
+			Return Null
+		End If
+		Return New TRollbackPacingController(sampleCount, enterLead, exitLead, maximumDelay)
+	End Function
+
+	Method Reset()
+		_sampleIndex = 0
+		_sampleCount = 0
+		_sampleSum = 0
+		_active = False
+		_recommendationCount = 0
+	End Method
+
+	Method Update:SRollbackPacingDecision(info:SRollbackPacingInfo)
+		If Not info.IsAvailable() Then
+			Return New SRollbackPacingDecision
+		End If
+		Local advantage:Int = info.FrameAdvantage()
+		If _sampleCount = _samples.Length Then
+			_sampleSum :- Long(_samples[_sampleIndex])
+		Else
+			_sampleCount :+ 1
+		End If
+		_samples[_sampleIndex] = advantage
+		_sampleSum :+ Long(advantage)
+		_sampleIndex = (_sampleIndex + 1) Mod _samples.Length
+		Local average:Int = Int(_sampleSum / Long(_sampleCount))
+		Local stable:Int = _sampleCount = _samples.Length
+		If stable Then
+			If _active Then
+				If average <= _exitLead Then
+					_active = False
+				End If
+			Else If average >= _enterLead Then
+				_active = True
+			End If
+		End If
+		Local delayFrames:Int
+		If _active Then
+			delayFrames = Min(_maximumDelay, Max(1, average - _exitLead))
+			_recommendationCount :+ 1
+		End If
+		Return New SRollbackPacingDecision(True, stable, advantage, average, delayFrames)
+	End Method
+
+	Method IsActive:Int()
+		Return _active
+	End Method
+
+	Method RecommendationCount:Long()
+		Return _recommendationCount
+	End Method
+End Type
 
 Rem
 bbdoc: Configuration for a #TRollbackSession.

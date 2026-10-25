@@ -73,13 +73,14 @@ Transport-independent building blocks for real-time multiplayer games.
 - `GameNet.RollbackSession` composes sessions and rollback storage into a
   reusable two- to eight-player deterministic timeline with input delay,
   redundant delivery, re-simulation, confirmed presentation effects, state
-  hashes, bounded authority-based resynchronisation, frame-advantage pacing
-  guidance, and explicit failure and input-stall diagnostics.
+  hashes, bounded authority-based resynchronisation, smoothed frame-advantage
+  pacing with hysteresis, and explicit failure and input-stall diagnostics.
 - `GameNet.RollbackSyncTest` automatically executes frames twice from the same
   state to identify hidden nondeterminism and its first differing state byte.
 - `GameNet.RollbackSpectator` starts viewers from a confirmed mid-match state
-  and advances them through a reliable ordered stream of confirmed inputs,
-  without prediction or rollback.
+  and advances them through a reliable ordered stream of confirmed inputs with
+  bounded catch-up batching and rebootstrap policy but no prediction or
+  rollback.
 - `GameNet.Replay` optionally records bounded confirmed-input timelines with
   opaque initial state, verification hashes, cursor playback, and portable
   serialization.
@@ -138,6 +139,11 @@ without requiring a network connection.
 deterministic Max2D clients through a non-authoritative ENet relay. It adds
 frame-numbered redundant input, bounded prediction lead, rollback over a real
 session, confirmed-state hashes, and repeatable delay and packet-loss testing.
+
+[`examples/rollback_soak`](examples/rollback_soak) runs 5,000 deterministic
+rollback frames through repeatable delay, reordering, packet loss, and
+duplication. It verifies convergence, rollback activity, and session health as
+part of the normal automated test suite.
 
 [`examples/gamekit_session`](examples/gamekit_session) programmatically
 uses `GameNet.OnlineFlow` to automatch two Game Center players, then validates

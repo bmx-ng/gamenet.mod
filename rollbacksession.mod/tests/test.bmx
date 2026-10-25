@@ -227,6 +227,24 @@ pacingInfo = pacingSession.PacingInfo(1, 2)
 Check(pacingInfo.IsAvailable(), "pacing becomes available")
 Check(pacingInfo.LocalFrame() = 4 And pacingInfo.SlowestRemoteFrame() = 1, "report pacing frames")
 Check(pacingInfo.FrameAdvantage() = 3 And pacingInfo.RecommendedDelayFrames() = 2, "bound frame pacing recommendation")
+Local pacingController:TRollbackPacingController = TRollbackPacingController.Create(3, 2, 0, 2)
+Check(pacingController <> Null, "create smoothed pacing controller")
+Local pacingDecision:SRollbackPacingDecision
+For Local sample:Int = 0 Until 3
+	pacingDecision = pacingController.Update(pacingInfo)
+Next
+Check(pacingDecision.IsStable() And pacingDecision.ShouldDelay(), "activate pacing after stable lead")
+Check(pacingDecision.SmoothedAdvantage() = 3 And pacingDecision.RecommendedDelayFrames() = 2, "smooth and bound pacing delay")
+pacingLength = WriteSingleInputBatch(Byte Ptr(pacingPacket), Size_T(pacingPacket.Length), 4, 0, 0)
+Check(pacingSession.ReceiveInputs(1, New SPacketView(Byte Ptr(pacingPacket), pacingLength)), "receive caught-up pacing progress")
+pacingInfo = pacingSession.PacingInfo(1, 2)
+For Local sample:Int = 0 Until 2
+	pacingDecision = pacingController.Update(pacingInfo)
+	Check(pacingDecision.ShouldDelay(), "pacing hysteresis prevents threshold oscillation")
+Next
+pacingDecision = pacingController.Update(pacingInfo)
+Check(Not pacingDecision.ShouldDelay() And Not pacingController.IsActive(), "release pacing after stable catch-up")
+Check(pacingController.RecommendationCount() = 3, "count pacing recommendations")
 
 ' A resumed non-authority can request recovery before a hash mismatch is observed.
 Local recoverySimulation:TPlainSimulation = New TPlainSimulation

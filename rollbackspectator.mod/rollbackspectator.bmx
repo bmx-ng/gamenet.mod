@@ -17,11 +17,12 @@ Module GameNet.RollbackSpectator
 
 ?bmxng2
 
-ModuleInfo "Version: 0.1"
+ModuleInfo "Version: 0.2"
 ModuleInfo "Author: Bruce A Henderson and contributors"
 ModuleInfo "License: zlib/libpng"
 ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 ModuleInfo "History: 0.1 Initial confirmed-input spectator stream"
+ModuleInfo "History: 0.2 Added bounded frame batching and backlog policy"
 
 Import GameNet.RollbackSession
 Import BRL.Blitz
@@ -30,9 +31,12 @@ Private
 
 Const SPECTATOR_BOOTSTRAP_MAGIC:UInt = $474e5342:UInt ' GNSB
 Const SPECTATOR_FRAME_MAGIC:UInt = $474e5346:UInt ' GNSF
+Const SPECTATOR_BATCH_MAGIC:UInt = $474e5350:UInt ' GNSP
 Const SPECTATOR_WIRE_VERSION:UInt = 1
 Const SPECTATOR_BOOTSTRAP_OVERHEAD:Size_T = 18
 Const SPECTATOR_FRAME_OVERHEAD:Size_T = 14
+Const SPECTATOR_BATCH_OVERHEAD:Size_T = 11
+Const SPECTATOR_BATCH_FRAME_OVERHEAD:Size_T = 4
 
 Public
 
@@ -65,6 +69,8 @@ Type TRollbackSpectatorSource
 	Field _nextFrame:UInt
 	Field _prepared:Int
 	Field _started:Int
+	Field _pendingFirstFrame:UInt
+	Field _pendingFrameCount:Int
 
 	Method New(session:TRollbackSession)
 		_session = session
@@ -105,6 +111,7 @@ Type TRollbackSpectatorSource
 		_nextFrame = frame
 		_prepared = True
 		_started = False
+		_pendingFrameCount = 0
 		Return True
 	End Method
 
@@ -138,6 +145,7 @@ Type TRollbackSpectatorSource
 	bbdoc: Writes the next fully confirmed input frame without consuming it.
 	End Rem
 	Method WriteNextFrame:Size_T(buffer:Byte Ptr, capacity:Size_T)
+		_pendingFrameCount = 0
 		If Not _started Or Not buffer Or _session.HasPendingRollback() Or Not _session.HasConfirmedFrame() Then
 			Return 0
 		End If
@@ -175,12 +183,102 @@ Type TRollbackSpectatorSource
 		Return writer.Position()
 	End Method
 
+	Rem
+	bbdoc: Writes up to @maximumFrames sequential confirmed frames without consuming them.
+	about: The resulting packet is suitable for catch-up bursts over reliable
+	ordered delivery. Call #CommitFrames only after the packet is accepted.
+	End Rem
+	Method WriteNextFrames:Size_T(buffer:Byte Ptr, capacity:Size_T, maximumFrames:Int = 8)
+		_pendingFrameCount = 0
+		If Not _started Or Not buffer Or maximumFrames < 1 Or maximumFrames > 255 Then
+			Return 0
+		End If
+		If _session.HasPendingRollback() Or Not _session.HasConfirmedFrame() Or capacity < SPECTATOR_BATCH_OVERHEAD Then
+			Return 0
+		End If
+		If RollbackFrameAfter(_nextFrame, _session.ConfirmedFrame()) Then
+			Return 0
+		End If
+
+		Local writer:SPacketWriter = New SPacketWriter(buffer, capacity)
+		writer.WriteUInt32(SPECTATOR_BATCH_MAGIC)
+		writer.WriteUInt8(SPECTATOR_WIRE_VERSION)
+		writer.WriteUInt8(UInt(_inputs.Length))
+		writer.WriteUInt32(_nextFrame)
+		writer.WriteUInt8(0)
+		Local count:Int
+		For Local offset:Int = 0 Until maximumFrames
+			Local frame:UInt = _nextFrame + UInt(offset)
+			If RollbackFrameAfter(frame, _session.ConfirmedFrame()) Then
+				Exit
+			End If
+			Local required:Size_T = SPECTATOR_BATCH_FRAME_OVERHEAD + Size_T(_inputs.Length * 2)
+			For Local player:Int = 0 Until _inputs.Length
+				If Not _session.GetConfirmedInput(player, frame, _inputs[player]) Then
+					Return 0
+				End If
+				required :+ _inputs[player].Length()
+			Next
+			Local nextState:SPacketView
+			If Not _session.GetSavedState(frame + 1, nextState) Then
+				Return 0
+			End If
+			If writer.Remaining() < required Then
+				Exit
+			End If
+			writer.WriteUInt32(RollbackHash32(nextState.Data(), nextState.Length()))
+			For Local input:SPacketView = EachIn _inputs
+				writer.WriteUInt16(UInt(input.Length()))
+				writer.WriteBytes(input.Data(), input.Length())
+			Next
+			count :+ 1
+		Next
+		If writer.Failed() Or count = 0 Then
+			Return 0
+		End If
+		buffer[10] = Byte(count)
+		_pendingFirstFrame = _nextFrame
+		_pendingFrameCount = count
+		Return writer.Position()
+	End Method
+
 	Method CommitFrame:Int(frame:UInt)
 		If Not _started Or frame <> _nextFrame Then
 			Return False
 		End If
 		_nextFrame :+ 1
+		_pendingFrameCount = 0
 		Return True
+	End Method
+
+	Method CommitFrames:Int(firstFrame:UInt, frameCount:Int)
+		If Not _started Or _pendingFrameCount < 1 Or firstFrame <> _pendingFirstFrame Or frameCount <> _pendingFrameCount Then
+			Return False
+		End If
+		_nextFrame :+ UInt(frameCount)
+		_pendingFrameCount = 0
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Returns the number of confirmed frames waiting to be sent.
+	End Rem
+	Method BacklogFrames:Int()
+		If Not _started Or Not _session.HasConfirmedFrame() Or RollbackFrameAfter(_nextFrame, _session.ConfirmedFrame()) Then
+			Return 0
+		End If
+		Return RollbackFrameDelta(_session.ConfirmedFrame(), _nextFrame) + 1
+	End Method
+
+	Rem
+	bbdoc: Returns whether a slow spectator should receive a fresh bootstrap.
+	End Rem
+	Method NeedsRebootstrap:Int(maximumBacklogFrames:Int)
+		Return maximumBacklogFrames >= 0 And BacklogFrames() > maximumBacklogFrames
+	End Method
+
+	Method PendingFrameCount:Int()
+		Return _pendingFrameCount
 	End Method
 
 	Method BootstrapFrame:UInt()
@@ -197,6 +295,14 @@ Type TRollbackSpectatorSource
 
 	Method FramePacketCapacity:Size_T()
 		Return SPECTATOR_FRAME_OVERHEAD + Size_T(_session.PlayerCount()) * (2 + _session.MaxInputSize())
+	End Method
+
+	Method BatchPacketCapacity:Size_T(maximumFrames:Int)
+		If maximumFrames < 1 Or maximumFrames > 255 Then
+			Return 0
+		End If
+		Local frameSize:Size_T = SPECTATOR_BATCH_FRAME_OVERHEAD + Size_T(_session.PlayerCount()) * (2 + _session.MaxInputSize())
+		Return SPECTATOR_BATCH_OVERHEAD + Size_T(maximumFrames) * frameSize
 	End Method
 End Type
 
@@ -324,6 +430,73 @@ Type TRollbackSpectatorSession
 		End If
 		_currentFrame :+ 1
 		_framesPlayed :+ 1
+		Return True
+	End Method
+
+	Rem
+	bbdoc: Validates and plays a sequential batch produced by #TRollbackSpectatorSource.WriteNextFrames.
+	End Rem
+	Method ReceiveFrames:Int(packet:SPacketView)
+		If Not _running Or _failed Then
+			Return False
+		End If
+		Local reader:SPacketReader = New SPacketReader(packet)
+		Local magic:UInt
+		Local version:UInt
+		Local players:UInt
+		Local firstFrame:UInt
+		Local count:UInt
+		If Not reader.ReadUInt32(magic) Or magic <> SPECTATOR_BATCH_MAGIC Or Not reader.ReadUInt8(version) Or version <> SPECTATOR_WIRE_VERSION Then
+			Return Fail(ERollbackSpectatorFailure.InvalidFrame)
+		End If
+		If Not reader.ReadUInt8(players) Or Int(players) <> _playerCount Or Not reader.ReadUInt32(firstFrame) Or firstFrame <> _currentFrame Or Not reader.ReadUInt8(count) Or count < 1 Then
+			Return Fail(ERollbackSpectatorFailure.InvalidFrame)
+		End If
+		For Local offset:Int = 0 Until Int(count)
+			Local expectedHash:UInt
+			If Not reader.ReadUInt32(expectedHash) Then
+				Return Fail(ERollbackSpectatorFailure.InvalidFrame)
+			End If
+			For Local player:Int = 0 Until _playerCount
+				Local length:UInt
+				If Not reader.ReadUInt16(length) Or length < 1 Or Size_T(length) > _maxInputSize Or Size_T(length) > reader.Remaining() Or Not reader.Skip(Size_T(length)) Then
+					Return Fail(ERollbackSpectatorFailure.InvalidFrame)
+				End If
+			Next
+		Next
+		If reader.Remaining() <> 0 Then
+			Return Fail(ERollbackSpectatorFailure.InvalidFrame)
+		End If
+
+		reader = New SPacketReader(packet)
+		reader.ReadUInt32(magic)
+		reader.ReadUInt8(version)
+		reader.ReadUInt8(players)
+		reader.ReadUInt32(firstFrame)
+		reader.ReadUInt8(count)
+		For Local offset:Int = 0 Until Int(count)
+			Local frame:UInt = firstFrame + UInt(offset)
+			Local expectedHash:UInt
+			reader.ReadUInt32(expectedHash)
+			For Local player:Int = 0 Until _playerCount
+				Local length:UInt
+				reader.ReadUInt16(length)
+				_inputs[player] = New SRollbackInput(frame, player, ERollbackInputStatus.Confirmed, New SPacketView(reader.RemainingView().Data(), Size_T(length)))
+				reader.Skip(Size_T(length))
+			Next
+			If Not _simulation.SimulateFrame(frame, _inputs) Then
+				Return Fail(ERollbackSpectatorFailure.SimulationFailed)
+			End If
+			Local stateLength:Size_T = _simulation.SaveState(_stateBuffer, _maxStateSize)
+			If stateLength = 0 Or stateLength > _maxStateSize Then
+				Return Fail(ERollbackSpectatorFailure.StateSaveFailed)
+			End If
+			If RollbackHash32(_stateBuffer, stateLength) <> expectedHash Then
+				Return Fail(ERollbackSpectatorFailure.StateHashMismatch)
+			End If
+			_currentFrame :+ 1
+			_framesPlayed :+ 1
+		Next
 		Return True
 	End Method
 
